@@ -82,8 +82,8 @@ android {
         applicationId "com.gbnam.hoseolife"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode 260304100
+        versionName "1.0.0"
     }
     signingConfigs {
         debug {

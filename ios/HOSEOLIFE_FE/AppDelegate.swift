@@ -34,13 +34,23 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 }
 
 class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
+  private let metroPort = 8092
+
   override func sourceURL(for bridge: RCTBridge) -> URL? {
     self.bundleURL()
   }
 
   override func bundleURL() -> URL? {
 #if DEBUG
-    RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: "index")
+    let bundleProvider = RCTBundleURLProvider.sharedSettings()
+    bundleProvider.jsLocation = "localhost:\(metroPort)"
+
+    if let dynamicURL = bundleProvider.jsBundleURL(forBundleRoot: "index") {
+      return dynamicURL
+    }
+
+    // Fallback for cases where packager host auto-detection fails.
+    return URL(string: "http://localhost:\(metroPort)/index.bundle?platform=ios&dev=true&minify=false")
 #else
     Bundle.main.url(forResource: "main", withExtension: "jsbundle")
 #endif
