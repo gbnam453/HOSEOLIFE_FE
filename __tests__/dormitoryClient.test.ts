@@ -843,7 +843,7 @@ describe('fetchDormitoryContent', () => {
             ),
         } as Response;
       }
-      if (url.includes('/board/nutrition/list')) {
+      if (url.includes('/board/nutrition')) {
         return { text: async () => '<html></html>' } as Response;
       }
       return { text: async () => '<html></html>' } as Response;
@@ -893,7 +893,7 @@ describe('fetchDormitoryContent', () => {
       if (url.includes('/board/notice/list?page=2')) {
         return { text: async () => buildHappyListHtml([]) } as Response;
       }
-      if (url.includes('/board/nutrition/list')) {
+      if (url.includes('/board/nutrition')) {
         return { text: async () => '<html></html>' } as Response;
       }
       return { text: async () => '<html></html>' } as Response;
@@ -952,7 +952,7 @@ describe('fetchDormitoryContent', () => {
           text: async () => buildHappyListHtml([]),
         } as Response;
       }
-      if (url.includes('/board/nutrition/list')) {
+      if (url.includes('/board/nutrition')) {
         return { text: async () => '<html></html>' } as Response;
       }
       return { text: async () => '<html></html>' } as Response;
@@ -985,7 +985,7 @@ describe('fetchDormitoryContent', () => {
       if (url === 'https://happydorm.hoseo.ac.kr' || url === 'https://happydorm.hoseo.ac.kr/') {
         return { text: async () => mainHtml } as Response;
       }
-      if (url.includes('/board/nutrition/list')) {
+      if (url.includes('/board/nutrition')) {
         return { text: async () => '<html></html>' } as Response;
       }
       return { text: async () => '<html></html>' } as Response;
@@ -1003,11 +1003,11 @@ describe('fetchDormitoryContent', () => {
     expect(result.meal?.sourceUrl).toBe(
       'https://happydorm.hoseo.ac.kr/board/nutrition/view?idx=745&category=',
     );
-    expect(requestedUrls.some(url => url.includes('/board/nutrition/list'))).toBe(false);
+    expect(requestedUrls.some(url => url.includes('/board/nutrition'))).toBe(false);
   });
 
   test('falls back to ASAN_HAPPY nutrition detail meal when main page meal block is missing', async () => {
-    const nutritionListHtml = `
+    const nutritionPageHtml = `
       <div class="table-notice">
         <a href="/board/nutrition/view?idx=744&amp;category=">최신 식단</a>
       </div>
@@ -1028,11 +1028,11 @@ describe('fetchDormitoryContent', () => {
       if (url === 'https://happydorm.hoseo.ac.kr' || url === 'https://happydorm.hoseo.ac.kr/') {
         return { text: async () => '<html><div>메인 식단 없음</div></html>' } as Response;
       }
-      if (url.includes('/board/nutrition/list')) {
-        return { text: async () => nutritionListHtml } as Response;
-      }
       if (url.includes('/board/nutrition/view?idx=744')) {
         return { text: async () => nutritionDetailHtml } as Response;
+      }
+      if (url.includes('/board/nutrition')) {
+        return { text: async () => nutritionPageHtml } as Response;
       }
       return { text: async () => '<html></html>' } as Response;
     });
@@ -1047,6 +1047,71 @@ describe('fetchDormitoryContent', () => {
     expect(result.meal?.updatedAt).toBe('2026.03.03');
     expect(result.meal?.imageUri).toBe('https://happydorm.hoseo.ac.kr/filedownload?hash=fallback-meal-hash');
     expect(result.meal?.sourceUrl).toBe('https://happydorm.hoseo.ac.kr/board/nutrition/view?idx=744&category=');
-    expect(requestedUrls.some(url => url.includes('/board/nutrition/list'))).toBe(true);
+    expect(requestedUrls.some(url => url.includes('/board/nutrition'))).toBe(true);
+  });
+
+  test('falls back to ASAN_HAPPY nutrition detail when main-page meal image is broken', async () => {
+    const mainHtml = `
+      <div class="content notice-slide">
+        <h4 style="cursor: pointer;">식단표<span>+</span></h4>
+        <div style="text-align: center">
+          <a>
+            <img src="/api/image/imgdownload?hash=broken-main-hash&idx=28" alt="식단표" />
+          </a>
+        </div>
+      </div>
+    `;
+    const nutritionPageHtml = `
+      <div class="table-notice">
+        <a href="/board/nutrition/view?idx=999&amp;category=">최신 식단</a>
+      </div>
+    `;
+    const nutritionDetailHtml = `
+      <div class="board-top-tit">행복 식단 상세<ul class="board-top-info"></ul></div>
+      <span class="date"><i class="icofont-calendar"></i>2026-03-06 10:06:35</span>
+      <div class="board-content">
+        <img src="/api/image/imgdownload?hash=fallback-good-hash&amp;idx=1836" />
+      </div>
+    `;
+
+    const fetchMock = jest.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/board/notice/list?page=1')) {
+        return { text: async () => '<html></html>' } as Response;
+      }
+      if (url === 'https://happydorm.hoseo.ac.kr' || url === 'https://happydorm.hoseo.ac.kr/') {
+        return { text: async () => mainHtml } as Response;
+      }
+      if (url.includes('/api/image/imgdownload?hash=broken-main-hash&idx=28')) {
+        return {
+          ok: false,
+          headers: {
+            get: () => 'text/html',
+          },
+          text: async () => '',
+        } as unknown as Response;
+      }
+      if (url.includes('/board/nutrition/view?idx=999')) {
+        return { text: async () => nutritionDetailHtml } as Response;
+      }
+      if (url.includes('/board/nutrition')) {
+        return { text: async () => nutritionPageHtml } as Response;
+      }
+      return { text: async () => '<html></html>' } as Response;
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchDormitoryContent('ASAN_HAPPY');
+    const requestedUrls = fetchMock.mock.calls.map(([input]) =>
+      typeof input === 'string' ? input : input.toString(),
+    );
+
+    expect(result.meal?.title).toBe('행복 식단 상세');
+    expect(result.meal?.updatedAt).toBe('2026.03.06');
+    expect(result.meal?.sourceUrl).toBe('https://happydorm.hoseo.ac.kr/board/nutrition/view?idx=999&category=');
+    expect(result.meal?.imageUri).toBe(
+      'https://happydorm.hoseo.ac.kr/api/image/imgdownload?hash=fallback-good-hash&idx=1836',
+    );
+    expect(requestedUrls.some(url => url.includes('/board/nutrition'))).toBe(true);
   });
 });

@@ -1,4 +1,4 @@
-import React, { startTransition, useEffect, useRef, useState } from 'react';
+import React, { startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Appearance,
@@ -59,9 +59,13 @@ import {
 } from './src/services/dormitoryClient';
 import {
   clearStoredDormitory,
+  getStoredDormitoryMealCache,
+  getStoredDormitoryNoticeCache,
   getStoredFavoriteNoticeKeys,
   getStoredDormitory,
   getStoredThemePreference,
+  setStoredDormitoryMealCache,
+  setStoredDormitoryNoticeCache,
   setStoredFavoriteNoticeKeys,
   setStoredDormitory,
   setStoredThemePreference,
@@ -126,8 +130,10 @@ const APP_VERSION = appPackage.version;
 const APP_SUBTITLE = '더 나은 기숙사 생활';
 const SPLASH_BACKGROUND_COLOR = '#668EFD';
 const SPLASH_BACKGROUND_COLOR_DIRECT = '#3BA86D';
+const STARTUP_BOOT_BACKGROUND_COLOR = '#FFFFFF';
 const DEFAULT_LOADING_IMAGE_ASPECT_RATIO = 1 / 1.414;
 const MEAL_IMAGE_MAX_RETRY_COUNT = 2;
+const MEAL_IMAGE_CACHE_ONLY_FALLBACK_MS = 180;
 const DORMITORY_TOGGLE_WIDTH = 128;
 const DORMITORY_TOGGLE_HEIGHT = 40;
 const DORMITORY_TOGGLE_PADDING = 2;
@@ -144,7 +150,7 @@ const DORMITORY_TOGGLE_DIRECT_LABEL_SHIFT_X = -2;
 const DORMITORY_TOGGLE_THUMB_HEIGHT = DORMITORY_TOGGLE_HEIGHT - DORMITORY_TOGGLE_PADDING * 2 - 2;
 const DORMITORY_TOGGLE_THUMB_TOP =
   Math.max(0, (DORMITORY_TOGGLE_HEIGHT - DORMITORY_TOGGLE_THUMB_HEIGHT) / 2 - 1);
-const STARTUP_SPLASH_MIN_VISIBLE_MS = 700;
+const STARTUP_SPLASH_MIN_VISIBLE_MS = 1000;
 const NOTICE_BODY_LINK_PATTERN = /(https?:\/\/[^\s<>"'`]+|www\.[^\s<>"'`]+)/gi;
 const NOTICE_BODY_TRAILING_LINK_PATTERN = /[.,!?;:)\]]+$/;
 const HAPPY_DORM_HOSTNAME = 'happydorm.hoseo.ac.kr';
@@ -177,8 +183,15 @@ const HOME_HEADER_LOGOS: Record<
   Extract<DormitoryCode, 'ASAN_HAPPY' | 'ASAN_DIRECT'>,
   ImageSourcePropType
 > = {
-  ASAN_HAPPY: require('./src/assets/branding/happy.png'),
-  ASAN_DIRECT: require('./src/assets/branding/hoseo.png'),
+  ASAN_HAPPY: require('./src/assets/branding/happy-header.png'),
+  ASAN_DIRECT: require('./src/assets/branding/hoseo-header.png'),
+};
+const HOME_HEADER_IOS_NATIVE_LOGO_URIS: Record<
+  Extract<DormitoryCode, 'ASAN_HAPPY' | 'ASAN_DIRECT'>,
+  string
+> = {
+  ASAN_HAPPY: 'header-happy',
+  ASAN_DIRECT: 'header-direct',
 };
 const PRETENDARD_FONTS = {
   thin: 'Pretendard-Thin',
@@ -213,6 +226,9 @@ const HAPTIC_OPTIONS = {
   ignoreAndroidSystemSettings: false,
 } as const;
 const DEFAULT_REFRESH_COLOR = '#668EFD';
+const WEBVIEW_REGION_BLOCKED_HTTP_STATUS_CODES = new Set([400]);
+// Temporary review-build override: always show region-restricted 안내 화면 in WebView.
+const FORCE_WEBVIEW_REGION_BLOCKED_SCREEN = false;
 
 type AppPressableProps = React.ComponentProps<typeof RNPressable>;
 
@@ -448,10 +464,10 @@ type AppPalette = {
 
 const LIGHT_COLORS: AppPalette = {
   quickLaunchTones: [
-    { iconBackground: '#6F8FF7', iconGlyph: '#EEF3FF', labelColor: '#4E67B8' },
-    { iconBackground: '#86A4FF', iconGlyph: '#F4F7FF', labelColor: '#5A72B8' },
-    { iconBackground: '#9DB8FF', iconGlyph: '#F8FAFF', labelColor: '#6880B8' },
-    { iconBackground: '#B5CCFF', iconGlyph: '#FFFFFF', labelColor: '#7488B7' },
+    { iconBackground: '#6F8FF7', iconGlyph: '#F7FAFF', labelColor: '#4E67B8' },
+    { iconBackground: '#7898F8', iconGlyph: '#F7FAFF', labelColor: '#526AB8' },
+    { iconBackground: '#82A2F9', iconGlyph: '#F7FAFF', labelColor: '#566EB9' },
+    { iconBackground: '#8BAAF9', iconGlyph: '#F7FAFF', labelColor: '#5B73BA' },
   ],
   background: '#F6F6F8',
   surface: '#FFFFFF',
@@ -490,10 +506,10 @@ const LIGHT_COLORS: AppPalette = {
 
 const DARK_COLORS: AppPalette = {
   quickLaunchTones: [
-    { iconBackground: 'rgba(102,142,253,0.52)', iconGlyph: '#EAF0FF', labelColor: '#D0DBF4' },
-    { iconBackground: 'rgba(120,158,255,0.48)', iconGlyph: '#EAF1FF', labelColor: '#C7D5F2' },
-    { iconBackground: 'rgba(137,173,255,0.42)', iconGlyph: '#F1F5FF', labelColor: '#C0CFEF' },
-    { iconBackground: 'rgba(156,187,255,0.34)', iconGlyph: '#F5F8FF', labelColor: '#B8C9E9' },
+    { iconBackground: 'rgba(102,142,253,0.52)', iconGlyph: '#F2F6FF', labelColor: '#D0DBF4' },
+    { iconBackground: 'rgba(112,151,254,0.49)', iconGlyph: '#F2F6FF', labelColor: '#CBD8F3' },
+    { iconBackground: 'rgba(122,160,255,0.46)', iconGlyph: '#F2F6FF', labelColor: '#C6D4F1' },
+    { iconBackground: 'rgba(132,169,255,0.43)', iconGlyph: '#F2F6FF', labelColor: '#C2D1EF' },
   ],
   background: '#101012',
   surface: '#18181C',
@@ -549,10 +565,10 @@ function getDormitoryBrandedPalette(basePalette: AppPalette, dormitoryCode: Dorm
     return {
       ...basePalette,
       quickLaunchTones: [
-        { iconBackground: 'rgba(77,186,129,0.52)', iconGlyph: '#E6F8EE', labelColor: '#CAEFD8' },
-        { iconBackground: 'rgba(101,197,145,0.46)', iconGlyph: '#ECFAF2', labelColor: '#C1EAD1' },
-        { iconBackground: 'rgba(127,210,162,0.4)', iconGlyph: '#F1FCF6', labelColor: '#B7E4C8' },
-        { iconBackground: 'rgba(153,220,178,0.34)', iconGlyph: '#F5FEF9', labelColor: '#ADDDC0' },
+        { iconBackground: 'rgba(77,186,129,0.52)', iconGlyph: '#F1FCF6', labelColor: '#CAEFD8' },
+        { iconBackground: 'rgba(84,190,133,0.49)', iconGlyph: '#F1FCF6', labelColor: '#C6ECD4' },
+        { iconBackground: 'rgba(91,194,137,0.46)', iconGlyph: '#F1FCF6', labelColor: '#C1E9D0' },
+        { iconBackground: 'rgba(98,198,141,0.43)', iconGlyph: '#F1FCF6', labelColor: '#BDE6CC' },
       ],
       primary: '#4DBA81',
       primary700: '#8FDFB5',
@@ -573,10 +589,10 @@ function getDormitoryBrandedPalette(basePalette: AppPalette, dormitoryCode: Dorm
   return {
     ...basePalette,
     quickLaunchTones: [
-      { iconBackground: '#5BBC87', iconGlyph: '#EBFFF5', labelColor: '#3F8A67' },
-      { iconBackground: '#72CB98', iconGlyph: '#F2FFF8', labelColor: '#4A946F' },
-      { iconBackground: '#88D7A8', iconGlyph: '#F7FFFB', labelColor: '#569E78' },
-      { iconBackground: '#9EE2B8', iconGlyph: '#FFFFFF', labelColor: '#63A882' },
+      { iconBackground: '#5BBC87', iconGlyph: '#F4FFF9', labelColor: '#3F8A67' },
+      { iconBackground: '#64C28D', iconGlyph: '#F4FFF9', labelColor: '#43906B' },
+      { iconBackground: '#6EC893', iconGlyph: '#F4FFF9', labelColor: '#48976F' },
+      { iconBackground: '#78CE99', iconGlyph: '#F4FFF9', labelColor: '#4C9D74' },
     ],
     primary: '#3BA86D',
     primary700: '#2F9560',
@@ -688,6 +704,9 @@ function App() {
   const colorScheme = useColorScheme();
   const [themePreference, setThemePreference] = useState<ThemePreference>('SYSTEM');
   const [themeDormitoryCode, setThemeDormitoryCode] = useState<DormitoryCode | null>(null);
+  const [startupStoredDormitoryCode, setStartupStoredDormitoryCode] = useState<DormitoryCode | null>(null);
+  const [isStartupDormitoryReady, setIsStartupDormitoryReady] = useState(false);
+  const [isIconFontReady, setIsIconFontReady] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(
     resolveIsDarkModeByPreference('SYSTEM', colorScheme ?? Appearance.getColorScheme()),
   );
@@ -697,8 +716,29 @@ function App() {
   const themePreferenceRef = useRef(themePreference);
 
   useEffect(() => {
-    MaterialCommunityIcon.loadFont().catch(() => {
-      // Keep UI running even if icon font registration is delayed.
+    let isMounted = true;
+
+    MaterialCommunityIcon.loadFont()
+      .catch(() => undefined)
+      .finally(() => {
+        if (!isMounted) {
+          return;
+        }
+        setIsIconFontReady(true);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const headerLogoUris = [HOME_HEADER_LOGOS.ASAN_HAPPY, HOME_HEADER_LOGOS.ASAN_DIRECT]
+      .map(source => Image.resolveAssetSource(source)?.uri)
+      .filter((uri): uri is string => typeof uri === 'string' && uri.length > 0);
+
+    headerLogoUris.forEach(uri => {
+      void Image.prefetch(uri).catch(() => undefined);
     });
   }, []);
 
@@ -709,6 +749,36 @@ function App() {
   useEffect(() => {
     themePreferenceRef.current = themePreference;
   }, [themePreference]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    getStoredDormitory()
+      .then(storedDormitory => {
+        if (!mounted) {
+          return;
+        }
+
+        if (isDormitoryCode(storedDormitory)) {
+          setThemeDormitoryCode(storedDormitory);
+          setStartupStoredDormitoryCode(storedDormitory);
+          return;
+        }
+
+        setStartupStoredDormitoryCode(null);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!mounted) {
+          return;
+        }
+        setIsStartupDormitoryReady(true);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -843,18 +913,41 @@ function App() {
   const themeTransitionStyle = {
     opacity: themeFadeOpacity,
   };
+  const startupBackgroundColor = isStartupDormitoryReady
+    ? getSplashBackgroundColorByDormitory(themeDormitoryCode)
+    : STARTUP_BOOT_BACKGROUND_COLOR;
+  const isFirstInstallStartup = isStartupDormitoryReady && startupStoredDormitoryCode === null;
+  const isAppContentReady =
+    isStartupDormitoryReady && (isIconFontReady || isFirstInstallStartup);
+  const isBrandedSplashReady = isStartupDormitoryReady && !isFirstInstallStartup;
+  const startupBootPlaceholderStyle = useMemo(
+    () => ({ flex: 1, backgroundColor: startupBackgroundColor }),
+    [startupBackgroundColor],
+  );
 
   return (
     <SafeAreaProvider>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} backgroundColor={colors.background} />
-      <Animated.View style={[styles.container, themeTransitionStyle]}>
-        <AppContent
-          isDarkMode={isDarkMode}
-          themePreference={themePreference}
-          onToggleDarkMode={handleToggleDarkMode}
-          onChangeThemePreference={handleThemePreferenceChange}
-          onDormitoryThemeChange={setThemeDormitoryCode}
-        />
+      <StatusBar
+        barStyle={isDarkMode ? 'light-content' : 'dark-content'}
+        backgroundColor={isAppContentReady ? colors.background : startupBackgroundColor}
+      />
+      <Animated.View
+        style={[styles.container, themeTransitionStyle, !isIconFontReady ? { backgroundColor: startupBackgroundColor } : null]}>
+        {isAppContentReady ? (
+          <AppContent
+            isDarkMode={isDarkMode}
+            themePreference={themePreference}
+            onToggleDarkMode={handleToggleDarkMode}
+            onChangeThemePreference={handleThemePreferenceChange}
+            initialStoredDormitoryCode={startupStoredDormitoryCode}
+            themedDormitoryCode={themeDormitoryCode}
+            onDormitoryThemeChange={setThemeDormitoryCode}
+          />
+        ) : isBrandedSplashReady ? (
+          <LoadingScreen backgroundColor={startupBackgroundColor} dormitoryCode={themeDormitoryCode} />
+        ) : (
+          <View style={startupBootPlaceholderStyle} />
+        )}
       </Animated.View>
     </SafeAreaProvider>
   );
@@ -865,22 +958,27 @@ function AppContent({
   themePreference,
   onToggleDarkMode,
   onChangeThemePreference,
+  initialStoredDormitoryCode,
+  themedDormitoryCode,
   onDormitoryThemeChange,
 }: {
   isDarkMode: boolean;
   themePreference: ThemePreference;
   onToggleDarkMode: () => void;
   onChangeThemePreference: (nextPreference: ThemePreference) => void;
+  initialStoredDormitoryCode: DormitoryCode | null;
+  themedDormitoryCode: DormitoryCode | null;
   onDormitoryThemeChange: (dormitoryCode: DormitoryCode | null) => void;
 }) {
+  const initialRouteScreen: Screen = initialStoredDormitoryCode ? 'LOADING' : 'ONBOARDING';
   const navigationRef = useNavigationContainerRef<AppStackParamList>();
   const navigationReadyRef = useRef(false);
   const pendingNavigationRef = useRef<
     { screen: Screen; type: 'push' | 'reset' | 'navigate' } | null
   >(null);
-  const [activeScreen, setActiveScreen] = useState<Screen>('LOADING');
-  const activeScreenRef = useRef<Screen>('LOADING');
-  const previousActiveScreenRef = useRef<Screen>('LOADING');
+  const [activeScreen, setActiveScreen] = useState<Screen>(initialRouteScreen);
+  const activeScreenRef = useRef<Screen>(initialRouteScreen);
+  const previousActiveScreenRef = useRef<Screen>(initialRouteScreen);
   const [isInternetConnected, setIsInternetConnected] = useState<boolean | null>(null);
   const [selectedDormitory, setSelectedDormitory] = useState<DormitoryCode | null>(null);
   const [defaultDormitory, setDefaultDormitory] = useState<DormitoryCode | null>(null);
@@ -928,6 +1026,8 @@ function AppContent({
   const forceReloadDormitoryRef = useRef<DormitoryCode | null>(null);
   const dormitoryContentCacheRef = useRef(new Map<ActiveDormitoryCode, DormitoryContent>());
   const dormitoryContentRequestRef = useRef(new Map<ActiveDormitoryCode, Promise<DormitoryContent>>());
+  const mealFetchInitializedRef = useRef(new Set<ActiveDormitoryCode>());
+  const startupMealPrefetchDoneRef = useRef(false);
   const dialogVisibleRef = useRef(dialogState.visible);
   const homeMealZoomVisibleRef = useRef(homeMealZoomVisible);
   const lastHomeBackPressedAtRef = useRef(0);
@@ -935,21 +1035,74 @@ function AppContent({
   const startupSplashStartedAtRef = useRef<number | null>(null);
   const startupHomeTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const hydrateNoticeDetailCacheFromNotices = (
+    dormitoryCode: ActiveDormitoryCode,
+    noticeItems: NoticeItem[],
+  ) => {
+    const expiresAt = Date.now() + NOTICE_DETAIL_CACHE_TTL_MS;
+    noticeItems.forEach(noticeItem => {
+      const hasDetailedPayload =
+        noticeItem.body.trim().length > 0 ||
+        Boolean(noticeItem.bodyHtml?.trim().length) ||
+        noticeItem.attachments.length > 0 ||
+        (noticeItem.contentImages?.length ?? 0) > 0;
+      if (!hasDetailedPayload) {
+        return;
+      }
+
+      const cacheKey = buildNoticeCacheKey(dormitoryCode, noticeItem.id);
+      noticeDetailCacheRef.current.set(cacheKey, {
+        value: noticeItem,
+        expiresAt,
+      });
+    });
+  };
+
+  const mergeNoticesWithDetailCache = (
+    dormitoryCode: ActiveDormitoryCode,
+    noticeItems: NoticeItem[],
+  ) => {
+    const now = Date.now();
+    return noticeItems.map(noticeItem => {
+      const cacheKey = buildNoticeCacheKey(dormitoryCode, noticeItem.id);
+      const cachedDetail = noticeDetailCacheRef.current.get(cacheKey);
+      if (!cachedDetail || cachedDetail.expiresAt <= now || cachedDetail.value.id !== noticeItem.id) {
+        return noticeItem;
+      }
+
+      const detailed = cachedDetail.value;
+      return {
+        ...noticeItem,
+        body: detailed.body || noticeItem.body,
+        bodyHtml: detailed.bodyHtml ?? noticeItem.bodyHtml,
+        attachments: detailed.attachments.length > 0 ? detailed.attachments : noticeItem.attachments,
+        contentImages: detailed.contentImages ?? noticeItem.contentImages,
+      };
+    });
+  };
+
   const syncDormitoryNoticeToCache = (dormitoryCode: ActiveDormitoryCode, updatedNotice: NoticeItem) => {
     const cachedContent = dormitoryContentCacheRef.current.get(dormitoryCode);
     if (!cachedContent) {
       return;
     }
 
+    const nextNotices = cachedContent.notices.map(item => (item.id === updatedNotice.id ? updatedNotice : item));
     dormitoryContentCacheRef.current.set(dormitoryCode, {
       meal: cachedContent.meal,
-      notices: cachedContent.notices.map(item => (item.id === updatedNotice.id ? updatedNotice : item)),
+      notices: nextNotices,
     });
+    void setStoredDormitoryNoticeCache(dormitoryCode, nextNotices);
   };
 
-  useEffect(() => {
-    onDormitoryThemeChange(selectedDormitory);
-  }, [onDormitoryThemeChange, selectedDormitory]);
+  useLayoutEffect(() => {
+    const nextThemeDormitoryCode = selectedDormitory ?? themedDormitoryCode;
+    if (nextThemeDormitoryCode === themedDormitoryCode) {
+      return;
+    }
+
+    onDormitoryThemeChange(nextThemeDormitoryCode);
+  }, [onDormitoryThemeChange, selectedDormitory, themedDormitoryCode]);
   useEffect(() => {
     selectedDormitoryRef.current = selectedDormitory;
   }, [selectedDormitory]);
@@ -1201,6 +1354,32 @@ function AppContent({
         setSelectedDormitory(storedDormitory);
         setOnboardingSelection(storedDormitory);
         if (isActiveDormitory(storedDormitory)) {
+          const startupMealCaches = await Promise.all(
+            HOME_SWITCHABLE_DORMITORY_CODES.map(code => getStoredDormitoryMealCache(code).catch(() => null)),
+          );
+          if (isMounted) {
+            startupMealCaches.forEach((mealCache, index) => {
+              if (!mealCache?.meal) {
+                return;
+              }
+
+              const dormitoryCode = HOME_SWITCHABLE_DORMITORY_CODES[index];
+              const currentCachedNotices =
+                dormitoryContentCacheRef.current.get(dormitoryCode)?.notices ?? [];
+              dormitoryContentCacheRef.current.set(dormitoryCode, {
+                meal: mealCache.meal,
+                notices: currentCachedNotices,
+              });
+              void warmImageCache(mealCache.meal.imageUri);
+            });
+
+            const selectedDormitoryMealCache = startupMealCaches
+              .find((_, index) => HOME_SWITCHABLE_DORMITORY_CODES[index] === storedDormitory);
+            if (selectedDormitoryMealCache?.meal) {
+              setMeal(selectedDormitoryMealCache.meal);
+            }
+          }
+
           startupSplashStartedAtRef.current = Date.now();
           setPendingStartupHome(true);
           setContentLoading(true);
@@ -1264,35 +1443,94 @@ function AppContent({
     }
 
     const cachedContent = dormitoryContentCacheRef.current.get(activeDormitory);
-    if (cachedContent && !shouldForceReload) {
-      previousDormitoryRef.current = activeDormitory;
-      setNotices(cachedContent.notices);
-      setMeal(cachedContent.meal);
-      setContentLoading(false);
-      setIsPullRefreshing(false);
-      setContentError(null);
-      warmDormitoryContentMedia(cachedContent);
-      return () => {
-        isMounted = false;
-      };
-    }
-
     const dormitoryChanged = previousDormitoryRef.current !== activeDormitory;
     previousDormitoryRef.current = activeDormitory;
-    if (dormitoryChanged && !cachedContent) {
+
+    if (cachedContent && !shouldForceReload) {
+      setNotices(cachedContent.notices);
+      setMeal(cachedContent.meal);
+      setIsPullRefreshing(false);
+      setContentError(null);
+
+      if (cachedContent.meal) {
+        setContentLoading(false);
+        warmDormitoryContentMedia(cachedContent);
+        return () => {
+          isMounted = false;
+        };
+      }
+
+      setContentLoading(true);
+    } else if (dormitoryChanged && !cachedContent) {
       // Prevent showing stale data from previous dormitory only when no cache is available.
       setNotices([]);
       setMeal(null);
     }
 
     const loadContent = async () => {
-      setContentLoading(true);
       setContentError(null);
+      let hasHydratedPersistentNotices = false;
+      let hasHydratedPersistentMeal = false;
+
+      if (!shouldForceReload) {
+        const storedNoticeCachePromise = getStoredDormitoryNoticeCache(activeDormitory).catch(() => null);
+        const storedMealCache = await getStoredDormitoryMealCache(activeDormitory).catch(() => null);
+
+        if (isMounted && storedMealCache?.meal) {
+          const hydratedMeal = storedMealCache.meal;
+          const currentCachedNotices = dormitoryContentCacheRef.current.get(activeDormitory)?.notices ?? [];
+          dormitoryContentCacheRef.current.set(activeDormitory, {
+            meal: hydratedMeal,
+            notices: currentCachedNotices,
+          });
+          setMeal(hydratedMeal);
+          void warmImageCache(hydratedMeal.imageUri);
+          hasHydratedPersistentMeal = true;
+        }
+
+        if (isMounted && hasHydratedPersistentMeal) {
+          setContentLoading(false);
+          setIsPullRefreshing(false);
+        }
+        if (isMounted && !storedMealCache?.meal && dormitoryChanged && !cachedContent) {
+          setMeal(null);
+        }
+
+        const storedNoticeCache = await storedNoticeCachePromise;
+        if (isMounted && storedNoticeCache && storedNoticeCache.notices.length > 0) {
+          const hydratedNotices = mergeNoticesWithDetailCache(activeDormitory, storedNoticeCache.notices);
+          hydrateNoticeDetailCacheFromNotices(activeDormitory, hydratedNotices);
+
+          const currentCachedMeal = dormitoryContentCacheRef.current.get(activeDormitory)?.meal ?? null;
+          dormitoryContentCacheRef.current.set(activeDormitory, {
+            meal: currentCachedMeal,
+            notices: hydratedNotices,
+          });
+          setNotices(hydratedNotices);
+          void warmImageCacheBatch(hydratedNotices.flatMap(item => item.contentImages ?? []));
+          hasHydratedPersistentNotices = true;
+        }
+
+        if (isMounted && hasHydratedPersistentNotices) {
+          setIsPullRefreshing(false);
+        }
+      }
+
+      if (!hasHydratedPersistentMeal) {
+        setContentLoading(true);
+      }
 
       try {
         let contentRequest = dormitoryContentRequestRef.current.get(activeDormitory);
         if (!contentRequest || shouldForceReload) {
-          contentRequest = fetchDormitoryContent(activeDormitory);
+          const shouldIncludeMeal = !mealFetchInitializedRef.current.has(activeDormitory);
+          if (shouldIncludeMeal) {
+            mealFetchInitializedRef.current.add(activeDormitory);
+          }
+
+          contentRequest = fetchDormitoryContent(activeDormitory, {
+            includeMeal: shouldIncludeMeal,
+          });
           dormitoryContentRequestRef.current.set(activeDormitory, contentRequest);
         }
 
@@ -1306,12 +1544,27 @@ function AppContent({
           return;
         }
 
-        dormitoryContentCacheRef.current.set(activeDormitory, result);
-        setNotices(result.notices);
-        setMeal(result.meal);
-        warmDormitoryContentMedia(result);
+        const mergedNotices = mergeNoticesWithDetailCache(activeDormitory, result.notices);
+        hydrateNoticeDetailCacheFromNotices(activeDormitory, mergedNotices);
+        const currentCachedMeal = dormitoryContentCacheRef.current.get(activeDormitory)?.meal ?? null;
+        const resolvedMeal = result.meal ?? currentCachedMeal;
 
-        const previewTargets = result.notices
+        dormitoryContentCacheRef.current.set(activeDormitory, {
+          meal: resolvedMeal,
+          notices: mergedNotices,
+        });
+        setNotices(mergedNotices);
+        setMeal(resolvedMeal);
+        if (resolvedMeal) {
+          void setStoredDormitoryMealCache(activeDormitory, resolvedMeal);
+        }
+        void setStoredDormitoryNoticeCache(activeDormitory, mergedNotices);
+        warmDormitoryContentMedia({
+          meal: resolvedMeal,
+          notices: mergedNotices,
+        });
+
+        const previewTargets = mergedNotices
           .filter(item => Boolean(item.sourceUrl) && item.body.trim().length === 0)
           .slice(0, NOTICE_PREVIEW_PREFETCH_LIMIT);
 
@@ -1357,9 +1610,11 @@ function AppContent({
                 const nextNotices = current.map(item => updates.get(item.id) ?? item);
                 const currentCached = dormitoryContentCacheRef.current.get(activeDormitory);
                 dormitoryContentCacheRef.current.set(activeDormitory, {
-                  meal: currentCached?.meal ?? result.meal,
+                  meal: currentCached?.meal ?? resolvedMeal ?? null,
                   notices: nextNotices,
                 });
+                hydrateNoticeDetailCacheFromNotices(activeDormitory, nextNotices);
+                void setStoredDormitoryNoticeCache(activeDormitory, nextNotices);
                 return nextNotices;
               });
             })
@@ -1430,33 +1685,53 @@ function AppContent({
       return;
     }
 
-    const currentDormitory = selectedDormitory;
-    const prefetchTarget = HOME_SWITCHABLE_DORMITORY_CODES.find(code => code !== currentDormitory);
-    if (!prefetchTarget) {
+    if (startupMealPrefetchDoneRef.current) {
       return;
     }
 
-    if (
-      dormitoryContentCacheRef.current.has(prefetchTarget) ||
-      dormitoryContentRequestRef.current.has(prefetchTarget)
-    ) {
-      return;
-    }
+    startupMealPrefetchDoneRef.current = true;
 
-    const prefetchRequest = fetchDormitoryContent(prefetchTarget);
-    dormitoryContentRequestRef.current.set(prefetchTarget, prefetchRequest);
+    HOME_SWITCHABLE_DORMITORY_CODES.forEach(prefetchTarget => {
+      if (mealFetchInitializedRef.current.has(prefetchTarget)) {
+        return;
+      }
 
-    prefetchRequest
-      .then(result => {
-        dormitoryContentCacheRef.current.set(prefetchTarget, result);
-        warmDormitoryContentMedia(result);
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (dormitoryContentRequestRef.current.get(prefetchTarget) === prefetchRequest) {
-          dormitoryContentRequestRef.current.delete(prefetchTarget);
-        }
-      });
+      mealFetchInitializedRef.current.add(prefetchTarget);
+
+      const existingRequest = dormitoryContentRequestRef.current.get(prefetchTarget);
+      const prefetchRequest =
+        existingRequest ??
+        fetchDormitoryContent(prefetchTarget, {
+          includeMeal: true,
+        });
+      if (!existingRequest) {
+        dormitoryContentRequestRef.current.set(prefetchTarget, prefetchRequest);
+      }
+
+      prefetchRequest
+        .then(result => {
+          const mergedNotices = mergeNoticesWithDetailCache(prefetchTarget, result.notices);
+          hydrateNoticeDetailCacheFromNotices(prefetchTarget, mergedNotices);
+          const currentCachedMeal = dormitoryContentCacheRef.current.get(prefetchTarget)?.meal ?? null;
+          const resolvedMeal = result.meal ?? currentCachedMeal;
+          const mergedContent = {
+            meal: resolvedMeal,
+            notices: mergedNotices,
+          };
+          dormitoryContentCacheRef.current.set(prefetchTarget, mergedContent);
+          if (resolvedMeal) {
+            void setStoredDormitoryMealCache(prefetchTarget, resolvedMeal);
+          }
+          void setStoredDormitoryNoticeCache(prefetchTarget, mergedNotices);
+          warmDormitoryContentMedia(mergedContent);
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (dormitoryContentRequestRef.current.get(prefetchTarget) === prefetchRequest) {
+            dormitoryContentRequestRef.current.delete(prefetchTarget);
+          }
+        });
+    });
   }, [selectedDormitory]);
 
   useEffect(() => {
@@ -1552,12 +1827,21 @@ function AppContent({
         : HOME_SWITCHABLE_DORMITORY_CODES[0];
     const nextCachedContent = dormitoryContentCacheRef.current.get(nextDormitory);
 
+    selectedDormitoryRef.current = nextDormitory;
+    setSelectedDormitory(nextDormitory);
+    forceReloadDormitoryRef.current = null;
+    setSelectedNotice(null);
+    setMealTab('BREAKFAST');
+    setPendingStartupHome(false);
+
     if (nextCachedContent) {
-      setNotices(nextCachedContent.notices);
-      setMeal(nextCachedContent.meal);
-      setContentLoading(false);
-      setContentError(null);
-      setIsPullRefreshing(false);
+      startTransition(() => {
+        setNotices(nextCachedContent.notices);
+        setMeal(nextCachedContent.meal);
+        setContentLoading(false);
+        setContentError(null);
+        setIsPullRefreshing(false);
+      });
       warmDormitoryContentMedia(nextCachedContent);
     } else {
       const pendingNextRequest = dormitoryContentRequestRef.current.get(nextDormitory);
@@ -1571,13 +1855,6 @@ function AppContent({
           .catch(() => undefined);
       }
     }
-
-    selectedDormitoryRef.current = nextDormitory;
-    setSelectedDormitory(nextDormitory);
-    forceReloadDormitoryRef.current = null;
-    setSelectedNotice(null);
-    setMealTab('BREAKFAST');
-    setPendingStartupHome(false);
   };
 
   const isNoticeFavorited = (noticeId: string) => {
@@ -1815,7 +2092,8 @@ function AppContent({
     });
   };
 
-  const splashBackgroundColor = getSplashBackgroundColorByDormitory(selectedDormitory);
+  const splashDormitoryCode = selectedDormitory ?? themedDormitoryCode;
+  const splashBackgroundColor = getSplashBackgroundColorByDormitory(splashDormitoryCode);
   const safeAreaBackgroundColor = activeScreen === 'LOADING' ? splashBackgroundColor : colors.background;
   const safeAreaContentStyle = {
     backgroundColor: safeAreaBackgroundColor,
@@ -1833,7 +2111,7 @@ function AppContent({
           }}
           onStateChange={syncActiveRoute}>
           <AppStack.Navigator
-            initialRouteName="LOADING"
+            initialRouteName={initialRouteScreen}
             screenOptions={{
               headerShown: false,
               gestureEnabled: true,
@@ -1844,7 +2122,7 @@ function AppContent({
               {() => (
                 <LoadingScreen
                   backgroundColor={splashBackgroundColor}
-                  dormitoryCode={selectedDormitory}
+                  dormitoryCode={splashDormitoryCode}
                 />
               )}
             </AppStack.Screen>
@@ -1866,6 +2144,7 @@ function AppContent({
               {() => (
                 <HomeScreen
                   dormitory={dormitory}
+                  headerDormitoryCode={themedDormitoryCode}
                   isNeutral={isUndecided}
                   notices={notices}
                   meal={meal}
@@ -2217,8 +2496,31 @@ function OnboardingScreen({
   );
 }
 
+function HomeHeaderIcon({
+  dormitoryCode,
+}: {
+  dormitoryCode?: DormitoryCode | null;
+}) {
+  const targetCode = dormitoryCode === 'ASAN_DIRECT' ? 'ASAN_DIRECT' : 'ASAN_HAPPY';
+  const logoSource: ImageSourcePropType =
+    Platform.OS === 'ios'
+      ? { uri: HOME_HEADER_IOS_NATIVE_LOGO_URIS[targetCode] }
+      : HOME_HEADER_LOGOS[targetCode];
+
+  return (
+    <View style={styles.homeTopHeaderLogoWrap}>
+      <Image
+        source={logoSource}
+        resizeMode="contain"
+        style={styles.homeTopHeaderLogo}
+      />
+    </View>
+  );
+}
+
 function HomeScreen({
   dormitory,
+  headerDormitoryCode,
   isNeutral,
   notices,
   meal,
@@ -2237,6 +2539,7 @@ function HomeScreen({
   onRefresh,
 }: {
   dormitory: ReturnType<typeof getDormitoryOption>;
+  headerDormitoryCode?: DormitoryCode | null;
   isNeutral: boolean;
   notices: NoticeItem[];
   meal: MealItem | null;
@@ -2262,13 +2565,8 @@ function HomeScreen({
         : '행복기숙사/직영기숙사';
   const homeRefreshIndicatorColor = isDarkPalette(colors) ? '#C7C7CC' : '#8E8E93';
   const homeDisclosureText = `본 앱은 호서대학교 ${dormitoryDisclosureLabel} 공식 웹사이트의 공개 정보를 비공식적으로 재구성하여 제공하며, 모든 자료에 대한 저작권은 호서대학교 ${dormitoryDisclosureLabel}에 귀속됩니다. 실제 운영 정보와 상이할 수 있으므로, 정확한 안내는 반드시 기숙사 공식 홈페이지를 참조하시기 바랍니다.`;
-  const homeHeaderLogoSource =
-    dormitory?.code === 'ASAN_DIRECT'
-      ? HOME_HEADER_LOGOS.ASAN_DIRECT
-      : HOME_HEADER_LOGOS.ASAN_HAPPY;
-  const homeHeaderLogo = (
-    <Image source={homeHeaderLogoSource} resizeMode="contain" style={styles.homeTopHeaderLogo} />
-  );
+  const homeHeaderLogoCode = headerDormitoryCode ?? dormitory?.code ?? null;
+  const homeHeaderLogo = <HomeHeaderIcon dormitoryCode={homeHeaderLogoCode} />;
   const homeDormitoryToggleSlot = (
     <View style={styles.homeDormitoryToggleSlot}>
       <DormitorySwitchToggle
@@ -2377,7 +2675,7 @@ function HomeScreen({
         <AnimatedEntrance delay={90} distance={12}>
           <Pressable onPress={onOpenMealZoom} style={styles.homeMealHeroCard}>
             <View style={styles.homeMealHeroMedia}>
-              {contentLoading && !meal ? (
+              {!meal ? (
                 <View style={styles.mealPreviewSkeleton}>
                   <SkeletonBlock height={18} width="36%" />
                   <SkeletonBlock height={14} width="62%" />
@@ -2386,9 +2684,7 @@ function HomeScreen({
               ) : meal?.imageUri ? (
                 <MealVisual key={meal.imageUri} uri={meal.imageUri} />
               ) : (
-                <View style={styles.emptyMealPreview}>
-                  <Text style={styles.emptyMealPreviewText}>오늘 식단 정보가 아직 준비되지 않았습니다.</Text>
-                </View>
+                <View style={styles.emptyMealPreview} />
               )}
             </View>
           </Pressable>
@@ -3158,7 +3454,7 @@ function MealScreen({
   dormitoryLabel,
   meal,
   active,
-  contentLoading,
+  contentLoading: _contentLoading,
   tab,
   onBack,
   onSelectDormitory,
@@ -3200,12 +3496,25 @@ function MealScreen({
       <TopHeader title="식단표" onBack={onBack} />
       <Text style={styles.sectionCaption}>{dormitoryLabel}</Text>
 
-      {contentLoading && !meal ? (
-        <View style={styles.detailLoadingBox}>
-          <ActivityIndicator color={isDarkPalette(colors) ? '#C7C7CC' : '#8E8E93'} />
-          <Text style={styles.loadingInlineText}>식단을 불러오는 중입니다.</Text>
+      {!meal ? (
+        <View style={styles.mealLoadingSkeletonWrap}>
+          <View style={styles.mealLoadingToolbarSkeleton}>
+            <SkeletonBlock height={20} width="44%" />
+            <SkeletonBlock height={12} width="36%" />
+          </View>
+          <View style={styles.mealLoadingChipRow}>
+            <SkeletonBlock height={34} width={84} />
+            <SkeletonBlock height={34} width={84} />
+            <SkeletonBlock height={34} width={84} />
+          </View>
+          <View style={styles.mealLoadingBodyCard}>
+            <SkeletonBlock height={16} width="28%" />
+            <SkeletonBlock height={14} width="92%" />
+            <SkeletonBlock height={14} width="86%" />
+            <SkeletonBlock height={14} width="74%" />
+          </View>
         </View>
-      ) : meal ? (
+      ) : (
         <>
           <View style={styles.mealToolbar}>
             <Text style={styles.mealToolbarTitle}>{meal.title}</Text>
@@ -3257,12 +3566,6 @@ function MealScreen({
             </Pressable>
           </View>
         </>
-      ) : (
-        <InfoBanner
-          title="식단 정보 준비중"
-          message="오늘 식단 정보가 아직 준비되지 않았습니다."
-          compact
-        />
       )}
 
       <MealZoomModal visible={viewerVisible} imageUri={meal?.imageUri} onClose={() => setViewerVisible(false)} />
@@ -3477,8 +3780,25 @@ function WebViewScreen({
   const webViewRef = useRef<WebView>(null);
   const [webError, setWebError] = useState(false);
   const [webLoading, setWebLoading] = useState(false);
+  const [webRegionBlockedStatusCode, setWebRegionBlockedStatusCode] = useState<number | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const happyDormLastRedirectAtRef = useRef(0);
+  const isRegionBlockedScreenVisible =
+    FORCE_WEBVIEW_REGION_BLOCKED_SCREEN || webRegionBlockedStatusCode !== null;
+  const webViewBlockedLanguageCards = [
+    {
+      key: 'ko',
+      title: '페이지 연결이 원활하지 않아요',
+      body: '학교 기숙사 홈페이지는 한국에서만 접속할 수 있어요. 한국 외 지역에서는 페이지가 열리지 않을 수 있습니다. 네트워크를 변경한 뒤 다시 시도해 주세요.',
+      iconName: 'alert-circle-outline',
+    },
+    {
+      key: 'en',
+      title: 'This page is temporarily unavailable',
+      body: 'The dormitory website is available only in Korea. Outside Korea, this page may not open. Please switch networks and try again.',
+      iconName: 'earth-off',
+    },
+  ] as const;
   const showActionDateLabel =
     target?.sourceActionId === 'merit' || target?.sourceActionId === 'outing';
   const actionDateLabel = showActionDateLabel ? formatMonthDayWeekday(new Date()) : '';
@@ -3492,7 +3812,8 @@ function WebViewScreen({
 
   useEffect(() => {
     setWebError(false);
-    setWebLoading(Boolean(target?.url));
+    setWebLoading(Boolean(target?.url) && !FORCE_WEBVIEW_REGION_BLOCKED_SCREEN);
+    setWebRegionBlockedStatusCode(null);
     setReloadKey(0);
     happyDormLastRedirectAtRef.current = 0;
   }, [target?.url]);
@@ -3541,11 +3862,22 @@ function WebViewScreen({
     tryHappyDormActionRedirect(navigationState.url);
   };
 
-  const handleOpenInBrowser = () => {
-    if (!target?.url) {
+  const handleWebViewHttpError = (
+    event: NativeSyntheticEvent<{
+      statusCode: number;
+      description?: string;
+      url?: string;
+    }>,
+  ) => {
+    const statusCode = event.nativeEvent.statusCode;
+    setWebLoading(false);
+
+    if (WEBVIEW_REGION_BLOCKED_HTTP_STATUS_CODES.has(statusCode)) {
+      setWebRegionBlockedStatusCode(statusCode);
       return;
     }
-    Linking.openURL(target.url).catch(() => undefined);
+
+    setWebError(true);
   };
 
   return (
@@ -3569,6 +3901,40 @@ function WebViewScreen({
         <View style={styles.webViewStateBox}>
           <Text style={styles.emptyStateText}>연결할 페이지 주소가 없습니다.</Text>
         </View>
+      ) : isRegionBlockedScreenVisible ? (
+        <View style={styles.webViewStateBox}>
+          <View style={styles.webViewBlockedCardStack}>
+            {webViewBlockedLanguageCards.map(card => (
+              <View key={card.key} style={styles.webViewBlockedLanguageCard}>
+                <MaterialCommunityIcon
+                  name={card.iconName}
+                  size={22}
+                  style={styles.webViewBlockedLanguageIcon}
+                />
+                <Text style={styles.webViewBlockedLanguageTitle}>{card.title}</Text>
+                <Text style={styles.webViewBlockedLanguageBody}>{card.body}</Text>
+              </View>
+            ))}
+          </View>
+          {webRegionBlockedStatusCode ? (
+            <Text style={[styles.settingsMuted, styles.webViewBlockedStatusText]}>
+              페이지를 불러오지 못하고 있어요. 잠시 후 다시 시도해 주세요.
+            </Text>
+          ) : null}
+          {!FORCE_WEBVIEW_REGION_BLOCKED_SCREEN ? (
+            <View style={styles.inlineActionRow}>
+              <Pressable
+                style={styles.secondaryButtonCompact}
+                onPress={() => {
+                  setWebRegionBlockedStatusCode(null);
+                  setWebError(false);
+                  setReloadKey(current => current + 1);
+                }}>
+                <Text style={styles.secondaryButtonText}>다시 시도</Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </View>
       ) : webError ? (
         <View style={styles.webViewStateBox}>
           <Text style={styles.bannerTitle}>페이지를 불러오지 못했습니다.</Text>
@@ -3581,9 +3947,6 @@ function WebViewScreen({
                 setReloadKey(current => current + 1);
               }}>
               <Text style={styles.secondaryButtonText}>다시 시도</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryButtonCompact} onPress={handleOpenInBrowser}>
-              <Text style={styles.secondaryButtonText}>브라우저로 열기</Text>
             </Pressable>
           </View>
         </View>
@@ -3600,6 +3963,7 @@ function WebViewScreen({
             setSupportMultipleWindows={false}
             allowsBackForwardNavigationGestures
             onNavigationStateChange={handleWebViewNavigationChange}
+            onHttpError={handleWebViewHttpError}
             onShouldStartLoadWithRequest={request => {
               const targetUrl = request.url?.trim();
               if (!targetUrl) {
@@ -3619,6 +3983,9 @@ function WebViewScreen({
               tryHappyDormActionRedirect(event.nativeEvent.url);
             }}
             onError={() => {
+              if (webRegionBlockedStatusCode !== null) {
+                return;
+              }
               setWebLoading(false);
               setWebError(true);
             }}
@@ -3639,6 +4006,9 @@ function MealVisual({ uri }: { uri: string }) {
   const [aspectRatio, setAspectRatio] = useState(DEFAULT_LOADING_IMAGE_ASPECT_RATIO);
   const [retryAttempt, setRetryAttempt] = useState(0);
   const [retrySeed, setRetrySeed] = useState(() => Date.now());
+  const [imageCacheMode, setImageCacheMode] = useState<'CACHE_ONLY' | 'AUTO'>('CACHE_ONLY');
+  const [imageLoaded, setImageLoaded] = useState(false);
+  const hasLoadedCurrentImageRef = useRef(false);
   const resolvedImageUri = buildRetryImageUri(uri, retryAttempt, retrySeed);
 
   const applyAspectRatio = (width?: number, height?: number) => {
@@ -3647,10 +4017,17 @@ function MealVisual({ uri }: { uri: string }) {
     }
   };
   const handleImageLoad = (event: NativeSyntheticEvent<ImageLoadEventData>) => {
+    hasLoadedCurrentImageRef.current = true;
+    setImageLoaded(true);
     applyAspectRatio(event.nativeEvent.source.width, event.nativeEvent.source.height);
   };
   const handleImageError = () => {
     if (!uri || isSvgImage) {
+      return;
+    }
+
+    if (imageCacheMode === 'CACHE_ONLY') {
+      setImageCacheMode('AUTO');
       return;
     }
 
@@ -3667,19 +4044,33 @@ function MealVisual({ uri }: { uri: string }) {
     if (!uri) {
       setAspectRatio(DEFAULT_LOADING_IMAGE_ASPECT_RATIO);
       setRetryAttempt(0);
+      setImageCacheMode('CACHE_ONLY');
+      setImageLoaded(false);
+      hasLoadedCurrentImageRef.current = false;
       return;
     }
 
     if (isSvgImage) {
       setAspectRatio(getSvgAspectRatioFromDataUri(uri) ?? DEFAULT_LOADING_IMAGE_ASPECT_RATIO);
       setRetryAttempt(0);
+      setImageCacheMode('AUTO');
+      setImageLoaded(true);
+      hasLoadedCurrentImageRef.current = true;
       return;
     }
 
     setRetryAttempt(0);
     setRetrySeed(Date.now());
+    setImageCacheMode('CACHE_ONLY');
+    setImageLoaded(false);
+    hasLoadedCurrentImageRef.current = false;
 
     let cancelled = false;
+    const cacheOnlyFallbackTimer = setTimeout(() => {
+      if (!cancelled && !hasLoadedCurrentImageRef.current) {
+        setImageCacheMode('AUTO');
+      }
+    }, MEAL_IMAGE_CACHE_ONLY_FALLBACK_MS);
     void warmImageCache(uri);
     void getCachedImageSize(uri)
       .then(size => {
@@ -3701,6 +4092,7 @@ function MealVisual({ uri }: { uri: string }) {
 
     return () => {
       cancelled = true;
+      clearTimeout(cacheOnlyFallbackTimer);
     };
   }, [isSvgImage, uri]);
 
@@ -3718,12 +4110,25 @@ function MealVisual({ uri }: { uri: string }) {
   }
 
   return (
-    <Image
-      source={getCachedImageSource(resolvedImageUri, 'AUTO') ?? { uri: resolvedImageUri }}
-      onLoad={handleImageLoad}
-      onError={handleImageError}
-      style={[styles.mealPreviewImageContent, { aspectRatio }]}
-    />
+    <View style={[styles.mealPreviewImageFrame, { aspectRatio }]}>
+      {!imageLoaded ? (
+        <View style={styles.mealVisualLoadingSkeleton}>
+          <SkeletonBlock height={18} width="36%" />
+          <SkeletonBlock height={14} width="62%" />
+          <SkeletonBlock height={14} width="54%" />
+        </View>
+      ) : null}
+      <Image
+        source={getCachedImageSource(resolvedImageUri, imageCacheMode) ?? { uri: resolvedImageUri }}
+        onLoad={handleImageLoad}
+        onError={handleImageError}
+        style={[
+          styles.mealPreviewImageContent,
+          styles.mealVisualImageLayer,
+          !imageLoaded ? styles.mealVisualImageHidden : null,
+        ]}
+      />
+    </View>
   );
 }
 
@@ -4839,6 +5244,41 @@ function createStyles(
     alignItems: 'center',
     justifyContent: 'center',
   },
+  webViewBlockedCardStack: {
+    width: '100%',
+    gap: 10,
+  },
+  webViewBlockedLanguageCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.lineSoft,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  webViewBlockedLanguageIcon: {
+    color: colors.primary700,
+  },
+  webViewBlockedLanguageTitle: {
+    marginTop: 7,
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  webViewBlockedLanguageBody: {
+    marginTop: 6,
+    color: colors.textMuted,
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+  },
+  webViewBlockedStatusText: {
+    marginTop: 10,
+    textAlign: 'center',
+  },
   webViewActionDateSlot: {
     minWidth: 92,
     alignItems: 'flex-end',
@@ -5289,7 +5729,7 @@ function createStyles(
   },
   homeDashboardContent: {
     paddingHorizontal: 18,
-    paddingTop: 4,
+    paddingTop: 20,
     paddingBottom: 30,
   },
   homeHeaderRow: {
@@ -5818,6 +6258,27 @@ function createStyles(
     backgroundColor: colors.surfaceMuted,
     resizeMode: 'contain',
   },
+  mealVisualImageLayer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  mealVisualImageHidden: {
+    opacity: 0,
+  },
+  mealVisualLoadingSkeleton: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 20,
+    justifyContent: 'center',
+    gap: 12,
+    backgroundColor: colors.surfaceMuted,
+  },
   mealPreviewSkeleton: {
     width: '100%',
     aspectRatio: DEFAULT_LOADING_IMAGE_ASPECT_RATIO,
@@ -6089,9 +6550,15 @@ function createStyles(
     letterSpacing: -0.6,
     fontFamily: PRETENDARD_FONTS.black,
   },
-  homeTopHeaderLogo: {
+  homeTopHeaderLogoWrap: {
     width: 24,
     height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  homeTopHeaderLogo: {
+    width: 22,
+    height: 22,
   },
   topHeaderTitleWrap: {
     flex: 1,
@@ -6792,6 +7259,25 @@ function createStyles(
   mealToolbarSubtitle: {
     color: colors.textMuted,
     fontSize: 13,
+  },
+  mealLoadingSkeletonWrap: {
+    gap: 14,
+  },
+  mealLoadingToolbarSkeleton: {
+    gap: 8,
+  },
+  mealLoadingChipRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  mealLoadingBodyCard: {
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    padding: 18,
+    gap: 10,
+    ...cardShadow,
   },
   mealViewer: {
     flex: 1,

@@ -311,7 +311,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
-				CURRENT_PROJECT_VERSION = 260304100;
+				CURRENT_PROJECT_VERSION = 250307101;
 				DEVELOPMENT_TEAM = 7NNWCL6Q63;
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = HOSEOLIFE_FE/Info.plist;
@@ -322,7 +322,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.0.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
@@ -347,7 +347,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
-				CURRENT_PROJECT_VERSION = 260304100;
+				CURRENT_PROJECT_VERSION = 250307101;
 				DEVELOPMENT_TEAM = 7NNWCL6Q63;
 				INFOPLIST_FILE = HOSEOLIFE_FE/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "호서라이프";
@@ -357,7 +357,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.0.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",

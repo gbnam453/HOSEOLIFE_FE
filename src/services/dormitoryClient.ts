@@ -23,13 +23,20 @@ export interface DormitoryContent {
   meal: MealItem | null;
 }
 
+type FetchDormitoryContentOptions = {
+  includeMeal?: boolean;
+};
+
 export async function fetchDormitoryContent(
   dormitoryCode: DormitoryCode,
+  options: FetchDormitoryContentOptions = {},
 ): Promise<DormitoryContent> {
+  const includeMeal = options.includeMeal !== false;
+
   if (dormitoryCode === 'ASAN_HAPPY') {
     const [noticesResult, mealResult] = await Promise.allSettled([
       fetchHappyNotices(),
-      fetchHappyMeal(),
+      includeMeal ? fetchHappyMeal() : Promise.resolve(null),
     ]);
     const notices = noticesResult.status === 'fulfilled' ? noticesResult.value : [];
     const meal = mealResult.status === 'fulfilled' ? mealResult.value : null;
@@ -42,7 +49,7 @@ export async function fetchDormitoryContent(
   if (dormitoryCode === 'ASAN_DIRECT') {
     const [noticesResult, mealResult] = await Promise.allSettled([
       fetchDirectNotices(),
-      fetchDirectMeal(),
+      includeMeal ? fetchDirectMeal() : Promise.resolve(null),
     ]);
     const notices = noticesResult.status === 'fulfilled' ? noticesResult.value : [];
     const meal = mealResult.status === 'fulfilled' ? mealResult.value : null;
@@ -161,7 +168,10 @@ async function fetchHappyMeal(): Promise<MealItem | null> {
   try {
     const mainMeal = await fetchHappyMealFromMain();
     if (mainMeal) {
-      return mainMeal;
+      const isMainMealImageReachable = await isHappyMealImageReachable(mainMeal.imageUri);
+      if (isMainMealImageReachable) {
+        return mainMeal;
+      }
     }
   } catch {
     // Fallback to board nutrition detail when main meal card cannot be loaded.
@@ -203,44 +213,82 @@ async function fetchHappyMealFromMain(): Promise<MealItem | null> {
 }
 
 async function fetchHappyMealFromNutritionDetail(): Promise<MealItem | null> {
-  const response = await fetch(`${HAPPY_BASE}/board/nutrition/list`);
+  const response = await fetch(`${HAPPY_BASE}/board/nutrition`);
   const html = await response.text();
 
-  const firstHref = matchFirst(
-    html,
-    /href="([^"]*\/board\/nutrition\/view\?idx=\d+[^"]*)"/i,
+  const detailHrefs = uniqueStrings(
+    matchAll(
+      html,
+      /href=(['"])([^'"]*\/board\/nutrition\/view\?idx=\d+[^'"]*)\1/gi,
+    )
+      .map(([, , href]) => decodeHtmlEntities(href ?? '').trim())
+      .filter(Boolean),
   );
 
-  if (!firstHref) {
+  const topDetailHref = detailHrefs[0];
+  if (!topDetailHref) {
     return null;
   }
 
-  const detailUrl = absoluteUrl(HAPPY_BASE, decodeHtmlEntities(firstHref));
-  const detailResponse = await fetch(detailUrl);
-  const detailHtml = await detailResponse.text();
+  try {
+    const detailUrl = absoluteUrl(HAPPY_BASE, topDetailHref);
+    const detailResponse = await fetch(detailUrl);
+    const detailHtml = await detailResponse.text();
 
-  const title = cleanText(
-    matchFirst(detailHtml, /<div class="board-top-tit">\s*([\s\S]*?)<ul class="board-top-info">/i),
-  );
-  const updatedAt = normalizeDate(
-    matchFirst(detailHtml, /icofont-calendar[^>]*><\/i>\s*([0-9-]{10})/i),
-  );
-  const imagePath = matchFirst(
-    detailHtml,
-    /<div class="board-content">[\s\S]*?<img src="([^"]+)"/i,
-  );
+    const title = cleanText(
+      matchFirst(detailHtml, /<div class="board-top-tit">\s*([\s\S]*?)<ul class="board-top-info">/i) ??
+        matchFirst(detailHtml, /<div class="board-top-tit">\s*([\s\S]*?)<\/div>/i),
+    );
+    const updatedAt = normalizeDate(
+      matchFirst(detailHtml, /icofont-calendar[^>]*><\/i>\s*([0-9]{4}[.-][0-9]{2}[.-][0-9]{2})/i),
+    );
+    const bodyHtml =
+      extractDivByClass(detailHtml, 'board-content') ??
+      matchFirst(detailHtml, /<div class="board-content">([\s\S]*?)<\/div>/i);
+    const imageUri = extractImageUrlsFromHtml(bodyHtml ?? '', HAPPY_BASE)[0];
 
-  if (!imagePath) {
+    if (!imageUri) {
+      return null;
+    }
+
+    return {
+      title: title || '아산 행복기숙사 식단표',
+      description: '식단 이미지를 확대해서 볼 수 있습니다.',
+      updatedAt: updatedAt || '',
+      imageUri,
+      sourceUrl: detailUrl,
+    };
+  } catch {
     return null;
   }
+}
 
-  return {
-    title: title || '아산 행복기숙사 식단표',
-    description: '식단 이미지를 확대해서 볼 수 있습니다.',
-    updatedAt: updatedAt || '',
-    imageUri: absoluteUrl(HAPPY_BASE, imagePath),
-    sourceUrl: detailUrl,
-  };
+async function isHappyMealImageReachable(imageUri: string): Promise<boolean> {
+  if (!imageUri) {
+    return false;
+  }
+
+  try {
+    const response = await fetch(imageUri, {
+      headers: {
+        Referer: HAPPY_BASE,
+      },
+    });
+
+    if ('ok' in response && response.ok === false) {
+      return false;
+    }
+
+    const contentType =
+      typeof response.headers?.get === 'function' ? response.headers.get('Content-Type') : null;
+    if (contentType && !/^image\//i.test(contentType.trim())) {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function fetchDirectNotices(): Promise<NoticeItem[]> {
