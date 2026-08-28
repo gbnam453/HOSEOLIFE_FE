@@ -10,12 +10,17 @@ const pendingPrefetches = new Map<string, Promise<void>>();
 const imageSizeCache = new Map<string, ImageSize>();
 const pendingSizeLoads = new Map<string, Promise<ImageSize | null>>();
 
-function isRemoteHttpUrl(uri: string) {
-  return /^https?:\/\//i.test(uri);
-}
-
 function normalizeUri(uri?: string) {
   return uri?.trim();
+}
+
+export function isRemoteHttpUrl(uri?: string): boolean {
+  const normalizedUri = normalizeUri(uri);
+  if (!normalizedUri) {
+    return false;
+  }
+
+  return /^https?:\/\//i.test(normalizedUri);
 }
 
 export function hasWarmedImage(uri?: string): boolean {
@@ -28,6 +33,10 @@ export function hasWarmedImage(uri?: string): boolean {
 }
 
 async function hasNativeImageCache(uri: string) {
+  if (typeof Image.queryCache !== 'function') {
+    return false;
+  }
+
   try {
     const cacheState = await Image.queryCache([uri]);
     return Boolean(cacheState?.[uri]);
@@ -43,6 +52,12 @@ export function getCachedImageSource(
   const normalizedUri = normalizeUri(uri);
   if (!normalizedUri) {
     return undefined;
+  }
+
+  if (!isRemoteHttpUrl(normalizedUri)) {
+    return {
+      uri: normalizedUri,
+    };
   }
 
   if (cacheMode === 'CACHE_ONLY') {
@@ -64,6 +79,15 @@ export function getImageSizeFromCache(uri?: string): ImageSize | undefined {
     return undefined;
   }
   return imageSizeCache.get(normalizedUri);
+}
+
+export function markImageAsWarmed(uri?: string) {
+  const normalizedUri = normalizeUri(uri);
+  if (!normalizedUri || !isRemoteHttpUrl(normalizedUri)) {
+    return;
+  }
+
+  prefetchedUrls.add(normalizedUri);
 }
 
 export async function warmImageCache(uri?: string): Promise<void> {

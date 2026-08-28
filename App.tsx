@@ -1,4 +1,4 @@
-import React, { startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Appearance,
@@ -14,20 +14,16 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Platform,
-  Pressable as RNPressable,
   RefreshControl,
   ScrollView,
   type StyleProp,
   StatusBar,
   StyleSheet,
-  Text as RNText,
   ToastAndroid,
-  type TextStyle,
   useColorScheme,
   type ViewStyle,
   View,
 } from 'react-native';
-import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import ImageViewer from 'react-native-image-zoom-viewer';
 import MaterialCommunityIcon from 'react-native-vector-icons/MaterialCommunityIcons';
 import { WebView, type WebViewNavigation } from 'react-native-webview';
@@ -59,10 +55,10 @@ import {
 } from './src/services/dormitoryClient';
 import {
   clearStoredDormitory,
-  getStoredDormitoryMealCache,
-  getStoredDormitoryNoticeCache,
   getStoredFavoriteNoticeKeys,
   getStoredDormitory,
+  getStoredDormitoryMealCache,
+  getStoredDormitoryNoticeCache,
   getStoredThemePreference,
   setStoredDormitoryMealCache,
   setStoredDormitoryNoticeCache,
@@ -75,9 +71,33 @@ import {
   getCachedImageSize,
   getCachedImageSource,
   getImageSizeFromCache,
+  hasWarmedImage,
+  isRemoteHttpUrl,
   warmImageCache,
   warmImageCacheBatch,
 } from './src/utils/imageCache';
+import {
+  getSvgAspectRatioFromDataUri,
+  isLikelyImageUrl,
+  isLikelyUrl,
+  isSvgDataUri,
+  normalizeListPreviewText,
+  parseNoticeBodyBlocksFromHtml,
+  parseNoticeBodyWithLinks,
+  type NoticeBodyTable,
+} from './src/utils/contentUtils';
+import {
+  AppDialog,
+  Badge,
+  DormitorySwitchToggle,
+  InfoBanner,
+  NeutralRequiredCard,
+  SkeletonBlock,
+  TopActionButtons,
+  TopHeader,
+  setCommonUIStyles,
+} from './src/components/commonUi';
+import { PRETENDARD_FONTS, Pressable, Text, applyPretendardTypography } from './src/ui/primitives';
 import appPackage from './package.json';
 
 type Screen =
@@ -121,7 +141,7 @@ const THEME_PREFERENCE_OPTIONS: Array<{
   label: string;
   description: string;
 }> = [
-  { value: 'SYSTEM', label: '시스템 설정', description: '기기 설정을 따릅니다.' },
+  { value: 'SYSTEM', label: '시스템', description: '기기 설정을 따릅니다.' },
   { value: 'LIGHT', label: '라이트', description: '항상 밝은 테마를 사용합니다.' },
   { value: 'DARK', label: '다크', description: '항상 어두운 테마를 사용합니다.' },
 ];
@@ -132,8 +152,6 @@ const SPLASH_BACKGROUND_COLOR = '#668EFD';
 const SPLASH_BACKGROUND_COLOR_DIRECT = '#3BA86D';
 const STARTUP_BOOT_BACKGROUND_COLOR = '#FFFFFF';
 const DEFAULT_LOADING_IMAGE_ASPECT_RATIO = 1 / 1.414;
-const MEAL_IMAGE_MAX_RETRY_COUNT = 2;
-const MEAL_IMAGE_CACHE_ONLY_FALLBACK_MS = 180;
 const DORMITORY_TOGGLE_WIDTH = 128;
 const DORMITORY_TOGGLE_HEIGHT = 40;
 const DORMITORY_TOGGLE_PADDING = 2;
@@ -150,9 +168,8 @@ const DORMITORY_TOGGLE_DIRECT_LABEL_SHIFT_X = -2;
 const DORMITORY_TOGGLE_THUMB_HEIGHT = DORMITORY_TOGGLE_HEIGHT - DORMITORY_TOGGLE_PADDING * 2 - 2;
 const DORMITORY_TOGGLE_THUMB_TOP =
   Math.max(0, (DORMITORY_TOGGLE_HEIGHT - DORMITORY_TOGGLE_THUMB_HEIGHT) / 2 - 1);
-const STARTUP_SPLASH_MIN_VISIBLE_MS = 1000;
-const NOTICE_BODY_LINK_PATTERN = /(https?:\/\/[^\s<>"'`]+|www\.[^\s<>"'`]+)/gi;
-const NOTICE_BODY_TRAILING_LINK_PATTERN = /[.,!?;:)\]]+$/;
+const STARTUP_SPLASH_MIN_VISIBLE_MS = 1500;
+const WEBVIEW_LOCK_REDIRECT_COOLDOWN_MS = 500;
 const HAPPY_DORM_HOSTNAME = 'happydorm.hoseo.ac.kr';
 const HAPPY_DORM_HOME_PATHS = new Set(['/', '/main', '/main.do', '/index', '/index.do', '/home']);
 const HAPPY_DORM_REDIRECT_COOLDOWN_MS = 700;
@@ -193,106 +210,10 @@ const HOME_HEADER_IOS_NATIVE_LOGO_URIS: Record<
   ASAN_HAPPY: 'header-happy',
   ASAN_DIRECT: 'header-direct',
 };
-const PRETENDARD_FONTS = {
-  thin: 'Pretendard-Thin',
-  extraLight: 'Pretendard-ExtraLight',
-  light: 'Pretendard-Light',
-  regular: 'Pretendard-Regular',
-  medium: 'Pretendard-Medium',
-  semiBold: 'Pretendard-SemiBold',
-  bold: 'Pretendard-Bold',
-  extraBold: 'Pretendard-ExtraBold',
-  black: 'Pretendard-Black',
-} as const;
-type AppTextProps = React.ComponentProps<typeof RNText>;
-function Text({
-  style,
-  allowFontScaling = false,
-  ...rest
-}: AppTextProps) {
-  return (
-    <RNText
-      {...rest}
-      allowFontScaling={allowFontScaling}
-      style={[{ fontFamily: PRETENDARD_FONTS.medium }, style]}
-    />
-  );
-}
-const APP_FONT_SIZE_SCALE = 0.93;
-const APP_MIN_FONT_SIZE = 10;
-const APP_MIN_LINE_HEIGHT = 12;
-const HAPTIC_OPTIONS = {
-  enableVibrateFallback: false,
-  ignoreAndroidSystemSettings: false,
-} as const;
 const DEFAULT_REFRESH_COLOR = '#668EFD';
 const WEBVIEW_REGION_BLOCKED_HTTP_STATUS_CODES = new Set([400]);
 // Temporary review-build override: always show region-restricted 안내 화면 in WebView.
 const FORCE_WEBVIEW_REGION_BLOCKED_SCREEN = false;
-
-type AppPressableProps = React.ComponentProps<typeof RNPressable>;
-
-function Pressable({ onPress, disabled, ...rest }: AppPressableProps) {
-  const handlePress: AppPressableProps['onPress'] = event => {
-    if (!disabled && typeof onPress === 'function') {
-      ReactNativeHapticFeedback.trigger('impactLight', HAPTIC_OPTIONS);
-    }
-    onPress?.(event);
-  };
-
-  return <RNPressable {...rest} disabled={disabled} onPress={handlePress} />;
-}
-
-function resolvePretendardFontFamily(fontWeight?: string | number) {
-  let weightValue: number;
-
-  if (typeof fontWeight === 'number') {
-    weightValue = fontWeight;
-  } else if (typeof fontWeight === 'string') {
-    if (fontWeight === 'normal') {
-      weightValue = 500;
-    } else if (fontWeight === 'bold') {
-      weightValue = 700;
-    } else {
-      const parsedWeight = Number(fontWeight);
-      weightValue = Number.isNaN(parsedWeight) ? 500 : parsedWeight;
-    }
-  } else {
-    weightValue = 500;
-  }
-
-  if (weightValue >= 900) {
-    return PRETENDARD_FONTS.black;
-  }
-  if (weightValue >= 800) {
-    return PRETENDARD_FONTS.extraBold;
-  }
-  if (weightValue >= 700) {
-    return PRETENDARD_FONTS.bold;
-  }
-  if (weightValue >= 600) {
-    return PRETENDARD_FONTS.semiBold;
-  }
-  if (weightValue >= 400) {
-    return PRETENDARD_FONTS.medium;
-  }
-  if (weightValue >= 300) {
-    return PRETENDARD_FONTS.regular;
-  }
-  if (weightValue >= 200) {
-    return PRETENDARD_FONTS.light;
-  }
-  if (weightValue >= 100) {
-    return PRETENDARD_FONTS.extraLight;
-  }
-
-  return PRETENDARD_FONTS.thin;
-}
-
-function scaleTypographyMetric(value: number, minValue: number) {
-  const scaledValue = Math.round(value * APP_FONT_SIZE_SCALE * 100) / 100;
-  return Math.max(minValue, scaledValue);
-}
 
 function normalizeWebPath(pathname: string) {
   if (pathname === '/') {
@@ -323,6 +244,15 @@ function formatMonthDayWeekday(date: Date) {
   const day = date.getDate();
   const weekday = KOREAN_WEEKDAY_SHORT_LABELS[date.getDay()] ?? '';
   return `${month}/${day} (${weekday})`;
+}
+
+function compareNoticesByLatestDate(left: NoticeItem, right: NoticeItem) {
+  const dateOrder = right.date.localeCompare(left.date);
+  if (dateOrder !== 0) {
+    return dateOrder;
+  }
+
+  return right.id.localeCompare(left.id);
 }
 
 function isHappyDormHomeUrl(url: string) {
@@ -363,45 +293,33 @@ function buildHappyDormQuickActionRedirectScript(actionId: QuickAction['id']) {
   return `window.location.replace(${JSON.stringify(redirectUrl)}); true;`;
 }
 
-function applyPretendardTypography<T extends Record<string, Record<string, unknown>>>(styleDefinitions: T) {
-  const textStyleSignals = ['fontSize', 'lineHeight', 'letterSpacing', 'fontWeight'];
-  const iconStyleNamePattern = /(icon|glyph|chevron|arrow)/i;
+function isLockedQuickAction(actionId?: QuickAction['id']) {
+  return actionId === 'rules' || actionId === 'phone';
+}
 
-  for (const [styleName, style] of Object.entries(styleDefinitions)) {
-    if (iconStyleNamePattern.test(styleName)) {
-      continue;
-    }
+function buildWebViewReplaceScript(url: string) {
+  return `window.location.replace(${JSON.stringify(url)}); true;`;
+}
 
-    const hasSignal = textStyleSignals.some(key => Object.prototype.hasOwnProperty.call(style, key));
-    if (!hasSignal) {
-      continue;
-    }
-
-    const minFontSize = styleName === 'homeDisclosureText' ? 8 : APP_MIN_FONT_SIZE;
-    const minLineHeightBase = styleName === 'homeDisclosureText' ? 10 : APP_MIN_LINE_HEIGHT;
-
-    if (typeof style.fontSize === 'number') {
-      style.fontSize = scaleTypographyMetric(style.fontSize, minFontSize);
-    }
-
-    if (typeof style.lineHeight === 'number') {
-      const minLineHeight =
-        typeof style.fontSize === 'number'
-          ? Math.max(style.fontSize + 2, minLineHeightBase)
-          : minLineHeightBase;
-      style.lineHeight = scaleTypographyMetric(style.lineHeight, minLineHeight);
-    }
-
-    const fontWeight = style.fontWeight as string | number | undefined;
-    if (!Object.prototype.hasOwnProperty.call(style, 'fontFamily')) {
-      style.fontFamily = resolvePretendardFontFamily(fontWeight);
-    }
-    if (Object.prototype.hasOwnProperty.call(style, 'fontWeight')) {
-      delete style.fontWeight;
-    }
+function isSameLockedWebViewUrl(currentUrl: string, lockedUrl: string) {
+  const currentParsed = parseWebUrl(currentUrl);
+  const lockedParsed = parseWebUrl(lockedUrl);
+  if (!currentParsed || !lockedParsed) {
+    return false;
   }
 
-  return styleDefinitions;
+  if (currentParsed.hostname !== lockedParsed.hostname) {
+    return false;
+  }
+
+  const currentPathname = normalizeWebPath((currentParsed.pathname || '/').toLowerCase());
+  const lockedPathname = normalizeWebPath((lockedParsed.pathname || '/').toLowerCase());
+  if (currentPathname !== lockedPathname) {
+    return false;
+  }
+
+  const requiredSearchParams = Array.from(lockedParsed.searchParams.entries());
+  return requiredSearchParams.every(([key, value]) => currentParsed.searchParams.getAll(key).includes(value));
 }
 
 type AppPalette = {
@@ -651,20 +569,12 @@ function buildFavoriteNoticeStorageKey(dormitoryCode: ActiveDormitoryCode, notic
 }
 
 function warmDormitoryContentMedia(content: DormitoryContent) {
-  const mealImageUri = content.meal?.imageUri;
+  const mealImageUri = content.meal?.imageUri?.trim();
   const noticeImageUris = content.notices.flatMap(item => item.contentImages ?? []);
+  const warmTargets = mealImageUri ? [...noticeImageUris, mealImageUri] : noticeImageUris;
 
-  if (mealImageUri) {
-    void warmImageCache(mealImageUri).finally(() => {
-      if (noticeImageUris.length > 0) {
-        void warmImageCacheBatch(noticeImageUris);
-      }
-    });
-    return;
-  }
-
-  if (noticeImageUris.length > 0) {
-    void warmImageCacheBatch(noticeImageUris);
+  if (warmTargets.length > 0) {
+    void warmImageCacheBatch(warmTargets);
   }
 }
 
@@ -754,7 +664,7 @@ function App() {
     let mounted = true;
 
     getStoredDormitory()
-      .then(storedDormitory => {
+      .then(async storedDormitory => {
         if (!mounted) {
           return;
         }
@@ -910,6 +820,7 @@ function App() {
 
   colors = getDormitoryBrandedPalette(isDarkMode ? DARK_COLORS : LIGHT_COLORS, themeDormitoryCode);
   styles = createStyles(colors, getCardShadow(colors));
+  setCommonUIStyles(styles);
   const themeTransitionStyle = {
     opacity: themeFadeOpacity,
   };
@@ -980,17 +891,18 @@ function AppContent({
   const activeScreenRef = useRef<Screen>(initialRouteScreen);
   const previousActiveScreenRef = useRef<Screen>(initialRouteScreen);
   const [isInternetConnected, setIsInternetConnected] = useState<boolean | null>(null);
-  const [selectedDormitory, setSelectedDormitory] = useState<DormitoryCode | null>(null);
-  const [defaultDormitory, setDefaultDormitory] = useState<DormitoryCode | null>(null);
-  const [onboardingSelection, setOnboardingSelection] = useState<DormitoryCode | null>(null);
+  const [selectedDormitory, setSelectedDormitory] = useState<DormitoryCode | null>(initialStoredDormitoryCode);
+  const [defaultDormitory, setDefaultDormitory] = useState<DormitoryCode | null>(initialStoredDormitoryCode);
+  const [onboardingSelection, setOnboardingSelection] = useState<DormitoryCode | null>(initialStoredDormitoryCode);
   const [onboardingReturnScreen, setOnboardingReturnScreen] = useState<'SETTINGS' | null>(null);
   const [notices, setNotices] = useState<NoticeItem[]>([]);
   const [meal, setMeal] = useState<MealItem | null>(null);
+  const [mealUriByDormitory, setMealUriByDormitory] = useState<Partial<Record<ActiveDormitoryCode, string>>>({});
   const [contentLoading, setContentLoading] = useState(false);
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
   const [contentError, setContentError] = useState<string | null>(null);
   const [pendingStartupHome, setPendingStartupHome] = useState(false);
-  const previousDormitoryRef = useRef<DormitoryCode | null>(null);
+  const previousDormitoryRef = useRef<DormitoryCode | null>(initialStoredDormitoryCode);
   const [reloadSeq, setReloadSeq] = useState(0);
   const [selectedNotice, setSelectedNotice] = useState<NoticeItem | null>(null);
   const [noticeDetailLoading, setNoticeDetailLoading] = useState(false);
@@ -1021,12 +933,13 @@ function AppContent({
   const isActive = isActiveDormitory(selectedDormitory);
   const isUndecided = isUndecidedDormitory(selectedDormitory);
   const quickActions = selectedDormitory ? quickActionsByDormitory[selectedDormitory] : [];
-  const selectedDormitoryRef = useRef<DormitoryCode | null>(selectedDormitory);
+  const selectedDormitoryRef = useRef<DormitoryCode | null>(initialStoredDormitoryCode);
   const favoriteNoticeKeysRef = useRef(favoriteNoticeKeys);
   const forceReloadDormitoryRef = useRef<DormitoryCode | null>(null);
   const dormitoryContentCacheRef = useRef(new Map<ActiveDormitoryCode, DormitoryContent>());
   const dormitoryContentRequestRef = useRef(new Map<ActiveDormitoryCode, Promise<DormitoryContent>>());
-  const mealFetchInitializedRef = useRef(new Set<ActiveDormitoryCode>());
+  const sessionCrawledDormitoriesRef = useRef(new Set<ActiveDormitoryCode>());
+  const storageHydratedDormitoriesRef = useRef(new Set<ActiveDormitoryCode>());
   const startupMealPrefetchDoneRef = useRef(false);
   const dialogVisibleRef = useRef(dialogState.visible);
   const homeMealZoomVisibleRef = useRef(homeMealZoomVisible);
@@ -1034,6 +947,23 @@ function AppContent({
   const startupRestoredRef = useRef(false);
   const startupSplashStartedAtRef = useRef<number | null>(null);
   const startupHomeTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const markDormitoryAsCrawled = useCallback((dormitoryCode: ActiveDormitoryCode) => {
+    sessionCrawledDormitoriesRef.current.add(dormitoryCode);
+  }, []);
+  const syncMealUriCache = useCallback((dormitoryCode: ActiveDormitoryCode, sourceMeal?: MealItem | null) => {
+    const nextUri = sourceMeal?.imageUri?.trim();
+    setMealUriByDormitory(current => {
+      const currentUri = current[dormitoryCode];
+      if (!nextUri || currentUri === nextUri) {
+        return current;
+      }
+      return {
+        ...current,
+        [dormitoryCode]: nextUri,
+      };
+    });
+  }, []);
 
   const hydrateNoticeDetailCacheFromNotices = (
     dormitoryCode: ActiveDormitoryCode,
@@ -1094,6 +1024,8 @@ function AppContent({
     });
     void setStoredDormitoryNoticeCache(dormitoryCode, nextNotices);
   };
+
+  const mealDisplayUri = meal?.imageUri?.trim() || undefined;
 
   useLayoutEffect(() => {
     const nextThemeDormitoryCode = selectedDormitory ?? themedDormitoryCode;
@@ -1171,7 +1103,7 @@ function AppContent({
     };
   }, []);
 
-  const syncActiveRoute = () => {
+  const syncActiveRoute = useCallback(() => {
     const currentRoute = navigationRef.getCurrentRoute();
     if (!currentRoute) {
       return;
@@ -1180,9 +1112,9 @@ function AppContent({
     const routeName = currentRoute.name as Screen;
     activeScreenRef.current = routeName;
     setActiveScreen(routeName);
-  };
+  }, [navigationRef]);
 
-  const runNavigation = (targetScreen: Screen, type: 'push' | 'reset' | 'navigate') => {
+  const runNavigation = useCallback((targetScreen: Screen, type: 'push' | 'reset' | 'navigate') => {
     if (!navigationReadyRef.current || !navigationRef.isReady()) {
       pendingNavigationRef.current = {
         screen: targetScreen,
@@ -1209,9 +1141,9 @@ function AppContent({
     }
 
     navigationRef.dispatch(StackActions.push(targetScreen));
-  };
+  }, [navigationRef]);
 
-  const flushPendingNavigation = () => {
+  const flushPendingNavigation = useCallback(() => {
     const pendingNavigation = pendingNavigationRef.current;
     if (!pendingNavigation) {
       return;
@@ -1219,18 +1151,18 @@ function AppContent({
 
     pendingNavigationRef.current = null;
     runNavigation(pendingNavigation.screen, pendingNavigation.type);
-  };
+  }, [runNavigation]);
 
-  const goBack = (fallbackScreen: Screen = 'HOME') => {
+  const goBack = useCallback((fallbackScreen: Screen = 'HOME') => {
     if (navigationReadyRef.current && navigationRef.isReady() && navigationRef.canGoBack()) {
       navigationRef.goBack();
       return;
     }
 
     runNavigation(fallbackScreen, 'reset');
-  };
+  }, [navigationRef, runNavigation]);
 
-  const navigate = (
+  const navigate = useCallback((
     nextScreen: Screen,
     options: {
       direction?: NavigationDirection;
@@ -1248,7 +1180,7 @@ function AppContent({
     }
 
     runNavigation(nextScreen, 'push');
-  };
+  }, [goBack, runNavigation]);
 
   const openDialog = (title: string, message: string) => {
     setDialogState({
@@ -1351,35 +1283,11 @@ function AppContent({
 
       if (isDormitoryCode(storedDormitory)) {
         setDefaultDormitory(storedDormitory);
-        setSelectedDormitory(storedDormitory);
         setOnboardingSelection(storedDormitory);
         if (isActiveDormitory(storedDormitory)) {
-          const startupMealCaches = await Promise.all(
-            HOME_SWITCHABLE_DORMITORY_CODES.map(code => getStoredDormitoryMealCache(code).catch(() => null)),
-          );
-          if (isMounted) {
-            startupMealCaches.forEach((mealCache, index) => {
-              if (!mealCache?.meal) {
-                return;
-              }
-
-              const dormitoryCode = HOME_SWITCHABLE_DORMITORY_CODES[index];
-              const currentCachedNotices =
-                dormitoryContentCacheRef.current.get(dormitoryCode)?.notices ?? [];
-              dormitoryContentCacheRef.current.set(dormitoryCode, {
-                meal: mealCache.meal,
-                notices: currentCachedNotices,
-              });
-              void warmImageCache(mealCache.meal.imageUri);
-            });
-
-            const selectedDormitoryMealCache = startupMealCaches
-              .find((_, index) => HOME_SWITCHABLE_DORMITORY_CODES[index] === storedDormitory);
-            if (selectedDormitoryMealCache?.meal) {
-              setMeal(selectedDormitoryMealCache.meal);
-            }
-          }
-
+          // On each app launch, crawl the selected dormitory first.
+          forceReloadDormitoryRef.current = storedDormitory;
+          setSelectedDormitory(storedDormitory);
           startupSplashStartedAtRef.current = Date.now();
           setPendingStartupHome(true);
           setContentLoading(true);
@@ -1390,6 +1298,7 @@ function AppContent({
           return;
         }
 
+        setSelectedDormitory(storedDormitory);
         setPendingStartupHome(false);
         setContentLoading(false);
         startupRestoredRef.current = true;
@@ -1419,7 +1328,66 @@ function AppContent({
     return () => {
       isMounted = false;
     };
-  }, [isInternetConnected]);
+  }, [isInternetConnected, navigate]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const hydrateDormitoryCacheFromStorage = async (dormitoryCode: ActiveDormitoryCode) => {
+      const [storedNoticeCache, storedMealCache] = await Promise.all([
+        getStoredDormitoryNoticeCache(dormitoryCode),
+        getStoredDormitoryMealCache(dormitoryCode),
+      ]);
+
+      if (!isMounted) {
+        return;
+      }
+
+      const storedNotices = storedNoticeCache?.notices ?? [];
+      const storedMeal = storedMealCache?.meal ?? null;
+      if (!storedMeal && storedNotices.length === 0) {
+        storageHydratedDormitoriesRef.current.add(dormitoryCode);
+        return;
+      }
+
+      const existingCachedContent = dormitoryContentCacheRef.current.get(dormitoryCode);
+      const nextCachedContent: DormitoryContent = existingCachedContent
+        ? {
+            meal: existingCachedContent.meal ?? storedMeal,
+            notices:
+              existingCachedContent.notices.length > 0 ? existingCachedContent.notices : storedNotices,
+          }
+        : {
+            meal: storedMeal,
+            notices: storedNotices,
+          };
+
+      dormitoryContentCacheRef.current.set(dormitoryCode, nextCachedContent);
+      syncMealUriCache(dormitoryCode, nextCachedContent.meal);
+      warmDormitoryContentMedia(nextCachedContent);
+
+      if (selectedDormitoryRef.current === dormitoryCode) {
+        startTransition(() => {
+          setNotices(current => (current.length > 0 ? current : nextCachedContent.notices));
+          setMeal(current => current ?? nextCachedContent.meal);
+        });
+      }
+
+      storageHydratedDormitoriesRef.current.add(dormitoryCode);
+    };
+
+    HOME_SWITCHABLE_DORMITORY_CODES.forEach(dormitoryCode => {
+      if (storageHydratedDormitoriesRef.current.has(dormitoryCode)) {
+        return;
+      }
+
+      void hydrateDormitoryCacheFromStorage(dormitoryCode);
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [syncMealUriCache]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1445,23 +1413,25 @@ function AppContent({
     const cachedContent = dormitoryContentCacheRef.current.get(activeDormitory);
     const dormitoryChanged = previousDormitoryRef.current !== activeDormitory;
     previousDormitoryRef.current = activeDormitory;
+    const hasSessionCrawled = sessionCrawledDormitoriesRef.current.has(activeDormitory);
 
-    if (cachedContent && !shouldForceReload) {
+    if (cachedContent) {
       setNotices(cachedContent.notices);
       setMeal(cachedContent.meal);
+      syncMealUriCache(activeDormitory, cachedContent.meal);
       setIsPullRefreshing(false);
       setContentError(null);
+      warmDormitoryContentMedia(cachedContent);
 
-      if (cachedContent.meal) {
+      if (hasSessionCrawled && !shouldForceReload) {
         setContentLoading(false);
-        warmDormitoryContentMedia(cachedContent);
         return () => {
           isMounted = false;
         };
       }
+    }
 
-      setContentLoading(true);
-    } else if (dormitoryChanged && !cachedContent) {
+    if (dormitoryChanged && !cachedContent) {
       // Prevent showing stale data from previous dormitory only when no cache is available.
       setNotices([]);
       setMeal(null);
@@ -1469,65 +1439,12 @@ function AppContent({
 
     const loadContent = async () => {
       setContentError(null);
-      let hasHydratedPersistentNotices = false;
-      let hasHydratedPersistentMeal = false;
-
-      if (!shouldForceReload) {
-        const storedNoticeCachePromise = getStoredDormitoryNoticeCache(activeDormitory).catch(() => null);
-        const storedMealCache = await getStoredDormitoryMealCache(activeDormitory).catch(() => null);
-
-        if (isMounted && storedMealCache?.meal) {
-          const hydratedMeal = storedMealCache.meal;
-          const currentCachedNotices = dormitoryContentCacheRef.current.get(activeDormitory)?.notices ?? [];
-          dormitoryContentCacheRef.current.set(activeDormitory, {
-            meal: hydratedMeal,
-            notices: currentCachedNotices,
-          });
-          setMeal(hydratedMeal);
-          void warmImageCache(hydratedMeal.imageUri);
-          hasHydratedPersistentMeal = true;
-        }
-
-        if (isMounted && hasHydratedPersistentMeal) {
-          setContentLoading(false);
-          setIsPullRefreshing(false);
-        }
-        if (isMounted && !storedMealCache?.meal && dormitoryChanged && !cachedContent) {
-          setMeal(null);
-        }
-
-        const storedNoticeCache = await storedNoticeCachePromise;
-        if (isMounted && storedNoticeCache && storedNoticeCache.notices.length > 0) {
-          const hydratedNotices = mergeNoticesWithDetailCache(activeDormitory, storedNoticeCache.notices);
-          hydrateNoticeDetailCacheFromNotices(activeDormitory, hydratedNotices);
-
-          const currentCachedMeal = dormitoryContentCacheRef.current.get(activeDormitory)?.meal ?? null;
-          dormitoryContentCacheRef.current.set(activeDormitory, {
-            meal: currentCachedMeal,
-            notices: hydratedNotices,
-          });
-          setNotices(hydratedNotices);
-          void warmImageCacheBatch(hydratedNotices.flatMap(item => item.contentImages ?? []));
-          hasHydratedPersistentNotices = true;
-        }
-
-        if (isMounted && hasHydratedPersistentNotices) {
-          setIsPullRefreshing(false);
-        }
-      }
-
-      if (!hasHydratedPersistentMeal) {
-        setContentLoading(true);
-      }
+      setContentLoading(true);
 
       try {
         let contentRequest = dormitoryContentRequestRef.current.get(activeDormitory);
         if (!contentRequest || shouldForceReload) {
-          const shouldIncludeMeal = !mealFetchInitializedRef.current.has(activeDormitory);
-          if (shouldIncludeMeal) {
-            mealFetchInitializedRef.current.add(activeDormitory);
-          }
-
+          const shouldIncludeMeal = true;
           contentRequest = fetchDormitoryContent(activeDormitory, {
             includeMeal: shouldIncludeMeal,
           });
@@ -1555,6 +1472,8 @@ function AppContent({
         });
         setNotices(mergedNotices);
         setMeal(resolvedMeal);
+        syncMealUriCache(activeDormitory, resolvedMeal);
+        markDormitoryAsCrawled(activeDormitory);
         if (resolvedMeal) {
           void setStoredDormitoryMealCache(activeDormitory, resolvedMeal);
         }
@@ -1563,6 +1482,53 @@ function AppContent({
           meal: resolvedMeal,
           notices: mergedNotices,
         });
+        if (!startupMealPrefetchDoneRef.current) {
+          startupMealPrefetchDoneRef.current = true;
+          HOME_SWITCHABLE_DORMITORY_CODES.filter(code => code !== activeDormitory).forEach(prefetchTarget => {
+            if (sessionCrawledDormitoriesRef.current.has(prefetchTarget)) {
+              return;
+            }
+
+            const existingRequest = dormitoryContentRequestRef.current.get(prefetchTarget);
+            const prefetchRequest =
+              existingRequest ??
+              fetchDormitoryContent(prefetchTarget, {
+                includeMeal: true,
+              });
+            if (!existingRequest) {
+              dormitoryContentRequestRef.current.set(prefetchTarget, prefetchRequest);
+            }
+
+            prefetchRequest
+              .then(prefetchedResult => {
+                const mergedPrefetchedNotices = mergeNoticesWithDetailCache(
+                  prefetchTarget,
+                  prefetchedResult.notices,
+                );
+                hydrateNoticeDetailCacheFromNotices(prefetchTarget, mergedPrefetchedNotices);
+                const currentPrefetchedMeal = dormitoryContentCacheRef.current.get(prefetchTarget)?.meal ?? null;
+                const resolvedPrefetchedMeal = prefetchedResult.meal ?? currentPrefetchedMeal;
+                const mergedPrefetchedContent = {
+                  meal: resolvedPrefetchedMeal,
+                  notices: mergedPrefetchedNotices,
+                };
+                dormitoryContentCacheRef.current.set(prefetchTarget, mergedPrefetchedContent);
+                syncMealUriCache(prefetchTarget, resolvedPrefetchedMeal);
+                markDormitoryAsCrawled(prefetchTarget);
+                if (resolvedPrefetchedMeal) {
+                  void setStoredDormitoryMealCache(prefetchTarget, resolvedPrefetchedMeal);
+                }
+                void setStoredDormitoryNoticeCache(prefetchTarget, mergedPrefetchedNotices);
+                warmDormitoryContentMedia(mergedPrefetchedContent);
+              })
+              .catch(() => undefined)
+              .finally(() => {
+                if (dormitoryContentRequestRef.current.get(prefetchTarget) === prefetchRequest) {
+                  dormitoryContentRequestRef.current.delete(prefetchTarget);
+                }
+              });
+          });
+        }
 
         const previewTargets = mergedNotices
           .filter(item => Boolean(item.sourceUrl) && item.body.trim().length === 0)
@@ -1629,9 +1595,11 @@ function AppContent({
         if (fallbackContent) {
           setNotices(fallbackContent.notices);
           setMeal(fallbackContent.meal);
+          syncMealUriCache(activeDormitory, fallbackContent.meal);
         } else {
           setNotices([]);
           setMeal(null);
+          syncMealUriCache(activeDormitory, null);
         }
         setContentError(SYNC_DELAY_MESSAGE);
       } finally {
@@ -1653,86 +1621,27 @@ function AppContent({
     return () => {
       isMounted = false;
     };
-  }, [selectedDormitory, reloadSeq]);
+  }, [markDormitoryAsCrawled, reloadSeq, selectedDormitory, syncMealUriCache]);
 
   useEffect(() => {
-    const mealImageUri = meal?.imageUri;
     const noticeImageUris = notices.flatMap(item => item.contentImages ?? []);
-    let cancelled = false;
-
-    if (mealImageUri) {
-      void warmImageCache(mealImageUri).finally(() => {
-        if (!cancelled && noticeImageUris.length > 0) {
-          void warmImageCacheBatch(noticeImageUris);
-        }
-      });
-      return () => {
-        cancelled = true;
-      };
-    }
-
     if (noticeImageUris.length > 0) {
       void warmImageCacheBatch(noticeImageUris);
     }
-
-    return () => {
-      cancelled = true;
-    };
-  }, [meal?.imageUri, notices]);
+  }, [notices]);
 
   useEffect(() => {
-    if (!selectedDormitory || !isActiveDormitory(selectedDormitory)) {
+    if (!pendingStartupHome) {
       return;
     }
 
-    if (startupMealPrefetchDoneRef.current) {
+    const startupMealUri = meal?.imageUri?.trim();
+    if (!startupMealUri || hasWarmedImage(startupMealUri)) {
       return;
     }
 
-    startupMealPrefetchDoneRef.current = true;
-
-    HOME_SWITCHABLE_DORMITORY_CODES.forEach(prefetchTarget => {
-      if (mealFetchInitializedRef.current.has(prefetchTarget)) {
-        return;
-      }
-
-      mealFetchInitializedRef.current.add(prefetchTarget);
-
-      const existingRequest = dormitoryContentRequestRef.current.get(prefetchTarget);
-      const prefetchRequest =
-        existingRequest ??
-        fetchDormitoryContent(prefetchTarget, {
-          includeMeal: true,
-        });
-      if (!existingRequest) {
-        dormitoryContentRequestRef.current.set(prefetchTarget, prefetchRequest);
-      }
-
-      prefetchRequest
-        .then(result => {
-          const mergedNotices = mergeNoticesWithDetailCache(prefetchTarget, result.notices);
-          hydrateNoticeDetailCacheFromNotices(prefetchTarget, mergedNotices);
-          const currentCachedMeal = dormitoryContentCacheRef.current.get(prefetchTarget)?.meal ?? null;
-          const resolvedMeal = result.meal ?? currentCachedMeal;
-          const mergedContent = {
-            meal: resolvedMeal,
-            notices: mergedNotices,
-          };
-          dormitoryContentCacheRef.current.set(prefetchTarget, mergedContent);
-          if (resolvedMeal) {
-            void setStoredDormitoryMealCache(prefetchTarget, resolvedMeal);
-          }
-          void setStoredDormitoryNoticeCache(prefetchTarget, mergedNotices);
-          warmDormitoryContentMedia(mergedContent);
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          if (dormitoryContentRequestRef.current.get(prefetchTarget) === prefetchRequest) {
-            dormitoryContentRequestRef.current.delete(prefetchTarget);
-          }
-        });
-    });
-  }, [selectedDormitory]);
+    void warmImageCache(startupMealUri);
+  }, [meal, pendingStartupHome]);
 
   useEffect(() => {
     if (startupHomeTransitionTimerRef.current) {
@@ -1769,7 +1678,7 @@ function AppContent({
         startupHomeTransitionTimerRef.current = null;
       }
     };
-  }, [pendingStartupHome, selectedDormitory]);
+  }, [navigate, pendingStartupHome, selectedDormitory]);
 
   const handleContinueOnboarding = async (overrideCode?: DormitoryCode) => {
     const targetCode = overrideCode ?? onboardingSelection;
@@ -1787,7 +1696,7 @@ function AppContent({
     setDefaultDormitory(targetCode);
     setSelectedDormitory(targetCode);
     setOnboardingSelection(targetCode);
-    forceReloadDormitoryRef.current = null;
+    forceReloadDormitoryRef.current = isActiveDormitory(targetCode) ? targetCode : null;
     setSelectedNotice(null);
     setMealTab('BREAKFAST');
     setPendingStartupHome(false);
@@ -1835,6 +1744,11 @@ function AppContent({
     setPendingStartupHome(false);
 
     if (nextCachedContent) {
+      if (nextCachedContent.meal) {
+        void setStoredDormitoryMealCache(nextDormitory, nextCachedContent.meal);
+      }
+      void setStoredDormitoryNoticeCache(nextDormitory, nextCachedContent.notices);
+
       startTransition(() => {
         setNotices(nextCachedContent.notices);
         setMeal(nextCachedContent.meal);
@@ -1848,8 +1762,12 @@ function AppContent({
       if (pendingNextRequest) {
         pendingNextRequest
           .then(result => {
+            const mergedNotices = mergeNoticesWithDetailCache(nextDormitory, result.notices);
+            hydrateNoticeDetailCacheFromNotices(nextDormitory, mergedNotices);
+            void setStoredDormitoryNoticeCache(nextDormitory, mergedNotices);
+
             if (result.meal?.imageUri) {
-              void warmImageCache(result.meal.imageUri);
+              void setStoredDormitoryMealCache(nextDormitory, result.meal);
             }
           })
           .catch(() => undefined);
@@ -1955,7 +1873,7 @@ function AppContent({
   };
 
   const handleOpenHomeMealZoom = () => {
-    if (!meal?.imageUri) {
+    if (!mealDisplayUri) {
       handleOpenMeal();
       return;
     }
@@ -2144,10 +2062,13 @@ function AppContent({
               {() => (
                 <HomeScreen
                   dormitory={dormitory}
+                  selectedDormitoryCode={selectedDormitory}
                   headerDormitoryCode={themedDormitoryCode}
                   isNeutral={isUndecided}
                   notices={notices}
                   meal={meal}
+                  mealDisplayUri={mealDisplayUri}
+                  mealUriByDormitory={mealUriByDormitory}
                   quickActions={quickActions}
                   contentLoading={contentLoading}
                   contentError={contentError}
@@ -2217,6 +2138,7 @@ function AppContent({
                 <MealScreen
                   dormitoryLabel={dormitory?.label ?? '식단표'}
                   meal={meal}
+                  mealDisplayUri={mealDisplayUri}
                   active={isActive}
                   contentLoading={contentLoading}
                   tab={mealTab}
@@ -2276,7 +2198,7 @@ function AppContent({
 
         <MealZoomModal
           visible={homeMealZoomVisible}
-          imageUri={meal?.imageUri}
+          imageUri={mealDisplayUri}
           onClose={() => setHomeMealZoomVisible(false)}
         />
       </View>
@@ -2410,6 +2332,8 @@ function OnboardingScreen({
     const onboardingDormitoryTitle = option.label.replace(/^아산\s*/, '').trim() || option.label;
     const resolvedImageUri = Image.resolveAssetSource(visual.imageSource)?.uri;
     const imageMode = onboardingImageModeByCode[option.code] ?? 'ASSET';
+    const selectedBorderColor =
+      option.code === 'ASAN_DIRECT' ? SPLASH_BACKGROUND_COLOR_DIRECT : SPLASH_BACKGROUND_COLOR;
 
     const handleOnboardingImageError = () => {
       setOnboardingImageModeByCode(current => {
@@ -2440,7 +2364,14 @@ function OnboardingScreen({
           onSelect(option.code);
           onContinue(option.code);
         }}
-        style={[styles.onboardingVisualCard, isSelected ? styles.onboardingVisualCardSelected : null]}>
+        style={({ pressed }) => {
+          const shouldHighlightBorder = isSelected || pressed;
+          return [
+            styles.onboardingVisualCard,
+            shouldHighlightBorder ? styles.onboardingVisualCardSelected : null,
+            shouldHighlightBorder ? { borderColor: selectedBorderColor } : null,
+          ];
+        }}>
         <View style={styles.onboardingVisualMedia}>
           {imageMode === 'FALLBACK' ? (
             <View style={styles.onboardingVisualFallback}>
@@ -2482,7 +2413,7 @@ function OnboardingScreen({
         <View style={styles.onboardingMainContent}>
           <AnimatedEntrance delay={0} distance={12}>
             <View style={styles.onboardingTitleBlock}>
-              <Text style={styles.onboardingHeadline}>현재 어디에{'\n'}살고 있나요?</Text>
+              <Text style={styles.onboardingHeadline}>현재 어떤 기숙사에 살고있나요?</Text>
               <Text style={styles.onboardingSubhead}>거주하시는 기숙사를 선택해주세요.</Text>
             </View>
           </AnimatedEntrance>
@@ -2520,10 +2451,13 @@ function HomeHeaderIcon({
 
 function HomeScreen({
   dormitory,
+  selectedDormitoryCode,
   headerDormitoryCode,
   isNeutral,
   notices,
   meal,
+  mealDisplayUri,
+  mealUriByDormitory,
   quickActions,
   contentLoading,
   contentError,
@@ -2539,10 +2473,13 @@ function HomeScreen({
   onRefresh,
 }: {
   dormitory: ReturnType<typeof getDormitoryOption>;
+  selectedDormitoryCode?: DormitoryCode | null;
   headerDormitoryCode?: DormitoryCode | null;
   isNeutral: boolean;
   notices: NoticeItem[];
   meal: MealItem | null;
+  mealDisplayUri?: string;
+  mealUriByDormitory: Partial<Record<ActiveDormitoryCode, string>>;
   quickActions: QuickAction[];
   contentLoading: boolean;
   contentError: string | null;
@@ -2567,11 +2504,101 @@ function HomeScreen({
   const homeDisclosureText = `본 앱은 호서대학교 ${dormitoryDisclosureLabel} 공식 웹사이트의 공개 정보를 비공식적으로 재구성하여 제공하며, 모든 자료에 대한 저작권은 호서대학교 ${dormitoryDisclosureLabel}에 귀속됩니다. 실제 운영 정보와 상이할 수 있으므로, 정확한 안내는 반드시 기숙사 공식 홈페이지를 참조하시기 바랍니다.`;
   const homeHeaderLogoCode = headerDormitoryCode ?? dormitory?.code ?? null;
   const homeHeaderLogo = <HomeHeaderIcon dormitoryCode={homeHeaderLogoCode} />;
+  const resolvedHomeMealUri = mealDisplayUri;
+  const activeDormitoryCode: ActiveDormitoryCode | null =
+    selectedDormitoryCode && isActiveDormitory(selectedDormitoryCode)
+      ? selectedDormitoryCode
+      : null;
+  const layeredMealUris = useMemo(() => {
+    const baseUris: Partial<Record<ActiveDormitoryCode, string>> = { ...mealUriByDormitory };
+    const normalizedCurrentUri = resolvedHomeMealUri?.trim();
+    if (activeDormitoryCode && normalizedCurrentUri) {
+      baseUris[activeDormitoryCode] = normalizedCurrentUri;
+    }
+    return baseUris;
+  }, [activeDormitoryCode, mealUriByDormitory, resolvedHomeMealUri]);
+  const layeredMealEntries = useMemo(
+    () =>
+      HOME_SWITCHABLE_DORMITORY_CODES
+        .map(code => ({
+          code,
+          uri: layeredMealUris[code]?.trim(),
+        }))
+        .filter(entry => Boolean(entry.uri)) as Array<{ code: ActiveDormitoryCode; uri: string }>,
+    [layeredMealUris],
+  );
+  const baseLayerCode = layeredMealEntries[0]?.code ?? null;
+  const [readyMealUriByDormitory, setReadyMealUriByDormitory] =
+    useState<Partial<Record<ActiveDormitoryCode, string>>>({});
+  const [visibleMealDormitoryCode, setVisibleMealDormitoryCode] = useState<ActiveDormitoryCode | null>(
+    () =>
+      activeDormitoryCode && layeredMealUris[activeDormitoryCode]?.trim()
+        ? activeDormitoryCode
+        : layeredMealEntries[0]?.code ?? null,
+  );
+  const resolvedVisibleMealDormitoryCode = useMemo(() => {
+    const activeUri = activeDormitoryCode ? layeredMealUris[activeDormitoryCode]?.trim() : undefined;
+    const activeReady =
+      Boolean(activeDormitoryCode) &&
+      Boolean(activeUri) &&
+      readyMealUriByDormitory[activeDormitoryCode as ActiveDormitoryCode] === activeUri;
+    if (activeDormitoryCode && activeReady) {
+      return activeDormitoryCode;
+    }
+
+    if (visibleMealDormitoryCode && layeredMealUris[visibleMealDormitoryCode]?.trim()) {
+      return visibleMealDormitoryCode;
+    }
+
+    return layeredMealEntries[0]?.code ?? null;
+  }, [activeDormitoryCode, layeredMealEntries, layeredMealUris, readyMealUriByDormitory, visibleMealDormitoryCode]);
+  const hasLayeredMealVisual = layeredMealEntries.length > 0 && resolvedVisibleMealDormitoryCode !== null;
+  const handleMealLayerReady = useCallback((dormitoryCode: ActiveDormitoryCode, uri: string) => {
+    setReadyMealUriByDormitory(current => {
+      if (current[dormitoryCode] === uri) {
+        return current;
+      }
+      return {
+        ...current,
+        [dormitoryCode]: uri,
+      };
+    });
+    if (dormitoryCode === activeDormitoryCode) {
+      setVisibleMealDormitoryCode(dormitoryCode);
+    }
+  }, [activeDormitoryCode]);
+
+  useEffect(() => {
+    if (activeDormitoryCode && layeredMealUris[activeDormitoryCode]?.trim()) {
+      if (!visibleMealDormitoryCode) {
+        setVisibleMealDormitoryCode(activeDormitoryCode);
+      }
+      return;
+    }
+
+    if (visibleMealDormitoryCode && layeredMealUris[visibleMealDormitoryCode]?.trim()) {
+      return;
+    }
+
+    const firstAvailableCode = layeredMealEntries[0]?.code ?? null;
+    if (visibleMealDormitoryCode !== firstAvailableCode) {
+      setVisibleMealDormitoryCode(firstAvailableCode);
+    }
+  }, [activeDormitoryCode, layeredMealEntries, layeredMealUris, visibleMealDormitoryCode]);
+  const homeRecentNotices = useMemo(
+    () =>
+      notices
+        .filter(notice => !notice.isPinned)
+        .sort(compareNoticesByLatestDate)
+        .slice(0, 3),
+    [notices],
+  );
   const homeDormitoryToggleSlot = (
     <View style={styles.homeDormitoryToggleSlot}>
       <DormitorySwitchToggle
         selectedDormitory={dormitory?.code ?? null}
         onToggle={onToggleDormitory}
+        directThumbTranslateX={DORMITORY_TOGGLE_DIRECT_THUMB_TRANSLATE_X}
       />
     </View>
   );
@@ -2675,14 +2702,35 @@ function HomeScreen({
         <AnimatedEntrance delay={90} distance={12}>
           <Pressable onPress={onOpenMealZoom} style={styles.homeMealHeroCard}>
             <View style={styles.homeMealHeroMedia}>
-              {!meal ? (
+              {hasLayeredMealVisual ? (
+                <View style={styles.homeMealLayerStack}>
+                  {layeredMealEntries.map(entry => {
+                    const isVisible = entry.code === resolvedVisibleMealDormitoryCode;
+                    const isBaseLayer = entry.code === baseLayerCode;
+                    return (
+                      <View
+                        key={`home-meal-layer-${entry.code}`}
+                        pointerEvents="none"
+                        style={[
+                          !isBaseLayer ? styles.homeMealLayer : null,
+                          !isVisible ? styles.homeMealLayerHidden : null,
+                        ]}>
+                        <MealVisual
+                          uri={entry.uri}
+                          onReady={() => handleMealLayerReady(entry.code, entry.uri)}
+                        />
+                      </View>
+                    );
+                  })}
+                </View>
+              ) : resolvedHomeMealUri ? (
+                <MealVisual uri={resolvedHomeMealUri} />
+              ) : !meal ? (
                 <View style={styles.mealPreviewSkeleton}>
                   <SkeletonBlock height={18} width="36%" />
                   <SkeletonBlock height={14} width="62%" />
                   <SkeletonBlock height={14} width="54%" />
                 </View>
-              ) : meal?.imageUri ? (
-                <MealVisual key={meal.imageUri} uri={meal.imageUri} />
               ) : (
                 <View style={styles.emptyMealPreview} />
               )}
@@ -2738,7 +2786,7 @@ function HomeScreen({
         </AnimatedEntrance>
         <AnimatedEntrance delay={240} distance={12}>
           <View style={styles.homeNoticeFeed}>
-            {contentLoading && notices.length === 0 ? (
+            {contentLoading && homeRecentNotices.length === 0 ? (
               <View style={styles.homeNoticeSkeletonList}>
                 {Array.from({ length: 3 }).map((_, index) => (
                   <View key={`home-notice-skeleton-${index}`} style={[styles.homeNoticeCard, styles.homeNoticeSkeletonCard]}>
@@ -2750,8 +2798,8 @@ function HomeScreen({
                   </View>
                 ))}
               </View>
-            ) : notices.length > 0 ? (
-              notices.slice(0, 3).map((notice, index) => (
+            ) : homeRecentNotices.length > 0 ? (
+              homeRecentNotices.map((notice, index) => (
                 <AnimatedEntrance key={notice.id} delay={260 + index * 55} distance={10} duration={360}>
                   <Pressable onPress={() => onPressNotice(notice.id)} style={styles.homeNoticeCard}>
                     <View style={[styles.homeNoticeDot, notice.isPinned ? styles.homeNoticeDotPinned : null]} />
@@ -3453,6 +3501,7 @@ function NoticeInlineImage({
 function MealScreen({
   dormitoryLabel,
   meal,
+  mealDisplayUri,
   active,
   contentLoading: _contentLoading,
   tab,
@@ -3464,6 +3513,7 @@ function MealScreen({
 }: {
   dormitoryLabel: string;
   meal: MealItem | null;
+  mealDisplayUri?: string;
   active: boolean;
   contentLoading: boolean;
   tab: MealTab;
@@ -3546,7 +3596,7 @@ function MealScreen({
           ) : (
             <>
               <Pressable onPress={() => setViewerVisible(true)} style={styles.mealViewer}>
-                <MealVisual key={meal.imageUri} uri={meal.imageUri} />
+                <MealVisual uri={mealDisplayUri ?? meal.imageUri} />
                 <View style={styles.mealViewerHintBox}>
                   <MaterialCommunityIcon name="gesture-pinch" size={18} style={styles.mealViewerHintIcon} />
                   <Text style={styles.mealViewerHintText}>핀치 인/아웃으로 확대</Text>
@@ -3568,7 +3618,11 @@ function MealScreen({
         </>
       )}
 
-      <MealZoomModal visible={viewerVisible} imageUri={meal?.imageUri} onClose={() => setViewerVisible(false)} />
+      <MealZoomModal
+        visible={viewerVisible}
+        imageUri={mealDisplayUri ?? meal?.imageUri}
+        onClose={() => setViewerVisible(false)}
+      />
     </View>
   );
 }
@@ -3783,6 +3837,15 @@ function WebViewScreen({
   const [webRegionBlockedStatusCode, setWebRegionBlockedStatusCode] = useState<number | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const happyDormLastRedirectAtRef = useRef(0);
+  const lockedActionLastRedirectAtRef = useRef(0);
+  const lockedActionUrl = useMemo(() => {
+    if (!target?.url || !isLockedQuickAction(target?.sourceActionId)) {
+      return null;
+    }
+
+    const normalizedUrl = target.url.trim();
+    return normalizedUrl.length > 0 ? normalizedUrl : null;
+  }, [target?.sourceActionId, target?.url]);
   const isRegionBlockedScreenVisible =
     FORCE_WEBVIEW_REGION_BLOCKED_SCREEN || webRegionBlockedStatusCode !== null;
   const webViewBlockedLanguageCards = [
@@ -3816,7 +3879,26 @@ function WebViewScreen({
     setWebRegionBlockedStatusCode(null);
     setReloadKey(0);
     happyDormLastRedirectAtRef.current = 0;
+    lockedActionLastRedirectAtRef.current = 0;
   }, [target?.url]);
+
+  const enforceLockedActionRedirect = (currentUrl?: string | null) => {
+    if (!lockedActionUrl || !currentUrl) {
+      return false;
+    }
+
+    if (isSameLockedWebViewUrl(currentUrl, lockedActionUrl)) {
+      return false;
+    }
+
+    const now = Date.now();
+    if (now - lockedActionLastRedirectAtRef.current < WEBVIEW_LOCK_REDIRECT_COOLDOWN_MS) {
+      return true;
+    }
+    lockedActionLastRedirectAtRef.current = now;
+    webViewRef.current?.injectJavaScript(buildWebViewReplaceScript(lockedActionUrl));
+    return true;
+  };
 
   const tryHappyDormActionRedirect = (currentUrl?: string | null) => {
     if (!currentUrl) {
@@ -3859,7 +3941,12 @@ function WebViewScreen({
   };
 
   const handleWebViewNavigationChange = (navigationState: WebViewNavigation) => {
-    tryHappyDormActionRedirect(navigationState.url);
+    const currentUrl = navigationState.url;
+    const hasLockedActionRedirect = enforceLockedActionRedirect(currentUrl);
+    if (hasLockedActionRedirect) {
+      return;
+    }
+    tryHappyDormActionRedirect(currentUrl);
   };
 
   const handleWebViewHttpError = (
@@ -3970,6 +4057,18 @@ function WebViewScreen({
                 return false;
               }
 
+              if (lockedActionUrl) {
+                const isHttpUrl = targetUrl.startsWith('http://') || targetUrl.startsWith('https://');
+                if (!isHttpUrl) {
+                  return false;
+                }
+
+                if (!isSameLockedWebViewUrl(targetUrl, lockedActionUrl)) {
+                  enforceLockedActionRedirect(targetUrl);
+                  return false;
+                }
+              }
+
               if (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) {
                 return true;
               }
@@ -3980,7 +4079,12 @@ function WebViewScreen({
             onLoadStart={() => setWebLoading(true)}
             onLoadEnd={event => {
               setWebLoading(false);
-              tryHappyDormActionRedirect(event.nativeEvent.url);
+              const currentUrl = event.nativeEvent.url;
+              const hasLockedActionRedirect = enforceLockedActionRedirect(currentUrl);
+              if (hasLockedActionRedirect) {
+                return;
+              }
+              tryHappyDormActionRedirect(currentUrl);
             }}
             onError={() => {
               if (webRegionBlockedStatusCode !== null) {
@@ -4001,100 +4105,76 @@ function WebViewScreen({
   );
 }
 
-function MealVisual({ uri }: { uri: string }) {
-  const isSvgImage = isSvgDataUri(uri);
+function MealVisual({ uri, onReady }: { uri: string; onReady?: () => void }) {
+  const visualUri = uri?.trim() || '';
+  const isSvgImage = isSvgDataUri(visualUri);
   const [aspectRatio, setAspectRatio] = useState(DEFAULT_LOADING_IMAGE_ASPECT_RATIO);
-  const [retryAttempt, setRetryAttempt] = useState(0);
-  const [retrySeed, setRetrySeed] = useState(() => Date.now());
-  const [imageCacheMode, setImageCacheMode] = useState<'CACHE_ONLY' | 'AUTO'>('CACHE_ONLY');
   const [imageLoaded, setImageLoaded] = useState(false);
-  const hasLoadedCurrentImageRef = useRef(false);
-  const resolvedImageUri = buildRetryImageUri(uri, retryAttempt, retrySeed);
+  const hasNotifiedReadyRef = useRef(false);
+  const hasEverLoadedImageRef = useRef(false);
+  const onReadyRef = useRef(onReady);
+
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
+
+  const notifyReady = useCallback(() => {
+    if (hasNotifiedReadyRef.current) {
+      return;
+    }
+
+    hasNotifiedReadyRef.current = true;
+    onReadyRef.current?.();
+  }, []);
 
   const applyAspectRatio = (width?: number, height?: number) => {
     if (typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0) {
       setAspectRatio(width / height);
     }
   };
+
   const handleImageLoad = (event: NativeSyntheticEvent<ImageLoadEventData>) => {
-    hasLoadedCurrentImageRef.current = true;
+    hasEverLoadedImageRef.current = true;
     setImageLoaded(true);
     applyAspectRatio(event.nativeEvent.source.width, event.nativeEvent.source.height);
+    notifyReady();
   };
   const handleImageError = () => {
-    if (!uri || isSvgImage) {
-      return;
-    }
-
-    if (imageCacheMode === 'CACHE_ONLY') {
-      setImageCacheMode('AUTO');
-      return;
-    }
-
-    if (retryAttempt >= MEAL_IMAGE_MAX_RETRY_COUNT) {
-      void warmImageCache(uri);
-      return;
-    }
-
-    setRetryAttempt(current => current + 1);
-    setRetrySeed(Date.now());
+    hasEverLoadedImageRef.current = true;
+    setImageLoaded(true);
+    notifyReady();
   };
 
   useEffect(() => {
-    if (!uri) {
+    hasNotifiedReadyRef.current = false;
+
+    if (!visualUri) {
+      hasEverLoadedImageRef.current = false;
       setAspectRatio(DEFAULT_LOADING_IMAGE_ASPECT_RATIO);
-      setRetryAttempt(0);
-      setImageCacheMode('CACHE_ONLY');
       setImageLoaded(false);
-      hasLoadedCurrentImageRef.current = false;
       return;
     }
 
     if (isSvgImage) {
-      setAspectRatio(getSvgAspectRatioFromDataUri(uri) ?? DEFAULT_LOADING_IMAGE_ASPECT_RATIO);
-      setRetryAttempt(0);
-      setImageCacheMode('AUTO');
+      hasEverLoadedImageRef.current = true;
+      setAspectRatio(getSvgAspectRatioFromDataUri(visualUri) ?? DEFAULT_LOADING_IMAGE_ASPECT_RATIO);
       setImageLoaded(true);
-      hasLoadedCurrentImageRef.current = true;
+      notifyReady();
       return;
     }
 
-    setRetryAttempt(0);
-    setRetrySeed(Date.now());
-    setImageCacheMode('CACHE_ONLY');
-    setImageLoaded(false);
-    hasLoadedCurrentImageRef.current = false;
+    setImageLoaded(hasEverLoadedImageRef.current);
+    if (!hasEverLoadedImageRef.current && isRemoteHttpUrl(visualUri) && !hasWarmedImage(visualUri)) {
+      void warmImageCache(visualUri);
+    }
+    const cachedSize = getImageSizeFromCache(visualUri);
+    if (cachedSize) {
+      applyAspectRatio(cachedSize.width, cachedSize.height);
+      return;
+    }
 
-    let cancelled = false;
-    const cacheOnlyFallbackTimer = setTimeout(() => {
-      if (!cancelled && !hasLoadedCurrentImageRef.current) {
-        setImageCacheMode('AUTO');
-      }
-    }, MEAL_IMAGE_CACHE_ONLY_FALLBACK_MS);
-    void warmImageCache(uri);
-    void getCachedImageSize(uri)
-      .then(size => {
-        if (cancelled) {
-          return;
-        }
-
-        if (size) {
-          applyAspectRatio(size.width, size.height);
-        } else {
-          setAspectRatio(DEFAULT_LOADING_IMAGE_ASPECT_RATIO);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setAspectRatio(DEFAULT_LOADING_IMAGE_ASPECT_RATIO);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      clearTimeout(cacheOnlyFallbackTimer);
-    };
-  }, [isSvgImage, uri]);
+    setAspectRatio(DEFAULT_LOADING_IMAGE_ASPECT_RATIO);
+  }, [isSvgImage, notifyReady, visualUri]);
 
   if (isSvgImage) {
     return (
@@ -4102,16 +4182,18 @@ function MealVisual({ uri }: { uri: string }) {
         <WebView
           originWhitelist={['*']}
           scrollEnabled={false}
-          source={{ html: buildMealHtml(uri) }}
+          source={{ html: buildMealHtml(visualUri) }}
           style={styles.mealWebView}
         />
       </View>
     );
   }
 
+  const shouldRenderLoadingSkeleton = !imageLoaded && !hasEverLoadedImageRef.current;
+
   return (
     <View style={[styles.mealPreviewImageFrame, { aspectRatio }]}>
-      {!imageLoaded ? (
+      {shouldRenderLoadingSkeleton ? (
         <View style={styles.mealVisualLoadingSkeleton}>
           <SkeletonBlock height={18} width="36%" />
           <SkeletonBlock height={14} width="62%" />
@@ -4119,13 +4201,13 @@ function MealVisual({ uri }: { uri: string }) {
         </View>
       ) : null}
       <Image
-        source={getCachedImageSource(resolvedImageUri, imageCacheMode) ?? { uri: resolvedImageUri }}
+        source={getCachedImageSource(visualUri) ?? { uri: visualUri }}
         onLoad={handleImageLoad}
         onError={handleImageError}
         style={[
           styles.mealPreviewImageContent,
           styles.mealVisualImageLayer,
-          !imageLoaded ? styles.mealVisualImageHidden : null,
+          shouldRenderLoadingSkeleton ? styles.mealVisualImageHidden : null,
         ]}
       />
     </View>
@@ -4231,680 +4313,8 @@ function MealZoomModal({
   );
 }
 
-function DormitorySwitchToggle({
-  selectedDormitory,
-  onToggle,
-  disabled = false,
-}: {
-  selectedDormitory: DormitoryCode | null;
-  onToggle: () => void;
-  disabled?: boolean;
-}) {
-  const isDirectSelected = selectedDormitory === 'ASAN_DIRECT';
-  const toggleProgress = useRef(new Animated.Value(isDirectSelected ? 1 : 0)).current;
-
-  useEffect(() => {
-    toggleProgress.stopAnimation();
-    Animated.spring(toggleProgress, {
-      toValue: isDirectSelected ? 1 : 0,
-      damping: 18,
-      stiffness: 220,
-      mass: 0.8,
-      useNativeDriver: true,
-    }).start();
-  }, [isDirectSelected, toggleProgress]);
-
-  const thumbTranslateX = toggleProgress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, DORMITORY_TOGGLE_DIRECT_THUMB_TRANSLATE_X],
-  });
-
-  return (
-    <Pressable
-      onPress={onToggle}
-      disabled={disabled}
-      style={[
-        styles.dormitoryToggle,
-        isDirectSelected ? styles.dormitoryToggleDirect : styles.dormitoryToggleHappy,
-        disabled ? styles.dormitoryToggleDisabled : null,
-      ]}>
-      <Animated.View
-        style={[
-          styles.dormitoryToggleThumb,
-          isDirectSelected ? styles.dormitoryToggleThumbDirect : styles.dormitoryToggleThumbHappy,
-          { transform: [{ translateX: thumbTranslateX }] },
-        ]}
-      />
-      <View pointerEvents="none" style={styles.dormitoryToggleLabelRow}>
-        <View style={styles.dormitoryToggleLabelHalf}>
-          <Text
-            style={[
-              styles.dormitoryToggleTrackLabel,
-              !isDirectSelected ? styles.dormitoryToggleTrackLabelSelected : styles.dormitoryToggleTrackLabelUnselected,
-            ]}>
-            행복
-          </Text>
-        </View>
-        <View style={styles.dormitoryToggleLabelHalf}>
-          <Text
-            style={[
-              styles.dormitoryToggleTrackLabel,
-              styles.dormitoryToggleTrackLabelDirect,
-              isDirectSelected ? styles.dormitoryToggleTrackLabelSelected : styles.dormitoryToggleTrackLabelUnselected,
-            ]}>
-            직영
-          </Text>
-        </View>
-      </View>
-    </Pressable>
-  );
-}
-
-function TopActionButtons({
-  isDarkMode,
-  onToggleDarkMode,
-  inline = false,
-}: {
-  isDarkMode: boolean;
-  onToggleDarkMode: () => void;
-  inline?: boolean;
-}) {
-  const toggleProgress = useRef(new Animated.Value(isDarkMode ? 1 : 0)).current;
-
-  useEffect(() => {
-    Animated.spring(toggleProgress, {
-      toValue: isDarkMode ? 1 : 0,
-      damping: 18,
-      stiffness: 220,
-      mass: 0.8,
-      useNativeDriver: true,
-    }).start();
-  }, [isDarkMode, toggleProgress]);
-
-  const thumbTranslateX = toggleProgress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, 36],
-  });
-  const sunOpacity = toggleProgress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.96, 0.38],
-  });
-  const moonOpacity = toggleProgress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.38, 0.96],
-  });
-
-  return (
-    <View style={[styles.topActionRow, inline ? styles.topActionRowInline : null]}>
-      <Pressable
-        onPress={onToggleDarkMode}
-        style={[styles.themeToggle, isDarkMode ? styles.themeToggleDark : styles.themeToggleLight]}>
-        <View style={styles.themeToggleTrackIcons}>
-          <Animated.View style={{ opacity: sunOpacity }}>
-            <MaterialCommunityIcon
-              name="weather-sunny"
-              size={14}
-              style={[styles.themeToggleTrackIcon, !isDarkMode ? styles.themeToggleTrackIconActive : null]}
-            />
-          </Animated.View>
-          <Animated.View style={{ opacity: moonOpacity }}>
-            <MaterialCommunityIcon
-              name="weather-night"
-              size={14}
-              style={[styles.themeToggleTrackIcon, isDarkMode ? styles.themeToggleTrackIconActive : null]}
-            />
-          </Animated.View>
-        </View>
-        <Animated.View
-          style={[
-            styles.themeToggleThumb,
-            isDarkMode ? styles.themeToggleThumbDark : styles.themeToggleThumbLight,
-            {
-              transform: [{ translateX: thumbTranslateX }],
-            },
-          ]}>
-          <MaterialCommunityIcon
-            name={isDarkMode ? 'weather-night' : 'weather-sunny'}
-            size={15}
-            style={[styles.themeToggleThumbIcon, isDarkMode ? styles.themeToggleThumbIconDark : styles.themeToggleThumbIconLight]}
-          />
-        </Animated.View>
-      </Pressable>
-    </View>
-  );
-}
-
-function TopHeader({
-  title,
-  onBack,
-  backButtonPosition = 'right',
-  titleAlign = 'center',
-  inset = 'screen',
-  leftSlot,
-  rightSlot,
-  titleStyle,
-  titlePrefix,
-}: {
-  title: string;
-  onBack?: () => void;
-  backButtonPosition?: 'left' | 'right';
-  titleAlign?: 'center' | 'left';
-  inset?: 'screen' | 'wide';
-  leftSlot?: React.ReactNode;
-  rightSlot?: React.ReactNode;
-  titleStyle?: StyleProp<TextStyle>;
-  titlePrefix?: React.ReactNode;
-}) {
-  const safeAreaInsets = useSafeAreaInsets();
-  const showLeftBack = backButtonPosition === 'left' && Boolean(onBack);
-  const showRightBack = backButtonPosition === 'right' && Boolean(onBack);
-  const showCollapsedLeftSpacer = titleAlign === 'left' && !leftSlot && !showLeftBack;
-  const isCenterTitle = titleAlign === 'center';
-  const leftNode = leftSlot ? (
-    <View style={styles.topHeaderCustomSlot}>{leftSlot}</View>
-  ) : showLeftBack ? (
-    <Pressable onPress={onBack} style={styles.topHeaderButton} hitSlop={6}>
-      <MaterialCommunityIcon name="chevron-left" size={30} style={[styles.topHeaderButtonIcon, styles.topHeaderBackIcon]} />
-    </Pressable>
-  ) : (
-    <View style={showCollapsedLeftSpacer ? styles.topHeaderSpacerCollapsed : styles.topHeaderSpacer} />
-  );
-  const rightNode = rightSlot ? (
-    <View style={styles.topHeaderCustomSlot}>{rightSlot}</View>
-  ) : showRightBack ? (
-    <Pressable onPress={onBack} style={styles.topHeaderButton}>
-      <MaterialCommunityIcon name="close" size={22} style={styles.topHeaderButtonIcon} />
-    </Pressable>
-  ) : (
-    <View style={styles.topHeaderSpacer} />
-  );
-
-  return (
-    <View
-      style={[
-        styles.topHeaderShell,
-        inset === 'wide' ? styles.topHeaderShellWide : null,
-        { paddingTop: safeAreaInsets.top },
-      ]}>
-      <View style={styles.topHeader}>
-        {leftNode}
-        {isCenterTitle ? (
-          <View pointerEvents="none" style={styles.topHeaderTitleCenterOverlay}>
-            <Text
-              numberOfLines={1}
-              style={[styles.topHeaderTitle, styles.topHeaderTitleCenter, titleStyle]}>
-              {title}
-            </Text>
-          </View>
-        ) : (
-          <View style={styles.topHeaderTitleWrap}>
-            <View style={styles.topHeaderTitleRow}>
-              {titlePrefix ? <View style={styles.topHeaderTitlePrefix}>{titlePrefix}</View> : null}
-              <Text
-                numberOfLines={1}
-                style={[styles.topHeaderTitle, styles.topHeaderTitleLeft, styles.topHeaderTitleInline, titleStyle]}>
-                {title}
-              </Text>
-            </View>
-          </View>
-        )}
-        {rightNode}
-      </View>
-    </View>
-  );
-}
-
-function Badge({
-  label,
-  tone,
-}: {
-  label: string;
-  tone: 'PRIMARY' | 'ACCENT' | 'MUTED';
-}) {
-  return (
-    <Text
-      style={[
-        styles.badgeBase,
-        tone === 'PRIMARY' ? styles.badgePrimary : null,
-        tone === 'ACCENT' ? styles.badgeAccent : null,
-        tone === 'MUTED' ? styles.badgeMuted : null,
-      ]}>
-      {label}
-    </Text>
-  );
-}
-
-function SkeletonBlock({
-  width = '100%',
-  height = 14,
-}: {
-  width?: number | `${number}%` | '100%';
-  height?: number;
-}) {
-  const pulseOpacity = useRef(new Animated.Value(0.64)).current;
-
-  useEffect(() => {
-    const pulse = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseOpacity, {
-          toValue: 1,
-          duration: 560,
-          easing: Easing.inOut(Easing.quad),
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulseOpacity, {
-          toValue: 0.64,
-          duration: 560,
-          easing: Easing.inOut(Easing.quad),
-          useNativeDriver: true,
-        }),
-      ]),
-    );
-
-    pulse.start();
-    return () => {
-      pulse.stop();
-    };
-  }, [pulseOpacity]);
-
-  return <Animated.View style={[styles.skeletonBlock, { width, height, opacity: pulseOpacity }]} />;
-}
-
-function NeutralRequiredCard({
-  title,
-  message,
-  ctaLabel,
-  onPressCta,
-}: {
-  title: string;
-  message: string;
-  ctaLabel: string;
-  onPressCta: () => void;
-}) {
-  return (
-    <View style={styles.neutralRequiredCard}>
-      <Text style={styles.neutralRequiredTitle}>{title}</Text>
-      <Text style={styles.neutralRequiredMessage}>{message}</Text>
-      <Pressable style={styles.primaryButton} onPress={onPressCta}>
-        <Text style={styles.primaryButtonText}>{ctaLabel}</Text>
-      </Pressable>
-    </View>
-  );
-}
-
-function InfoBanner({
-  title,
-  message,
-  compact = false,
-}: {
-  title: string;
-  message: string;
-  compact?: boolean;
-}) {
-  return (
-    <View style={[styles.noticeBanner, compact ? styles.noticeBannerCompact : null]}>
-      <Text style={styles.bannerTitle}>{title}</Text>
-      <Text style={styles.bannerSubtitle}>{message}</Text>
-    </View>
-  );
-}
-
-function AppDialog({
-  visible,
-  title,
-  message,
-  onClose,
-}: {
-  visible: boolean;
-  title: string;
-  message: string;
-  onClose: () => void;
-}) {
-  return (
-    <Modal animationType="fade" transparent visible={visible} onRequestClose={onClose}>
-      <View style={styles.dialogBackdrop}>
-        <View style={styles.dialogCard}>
-          <Text style={styles.dialogTitle}>{title}</Text>
-          <Text style={styles.dialogMessage}>{message}</Text>
-          <Pressable onPress={onClose} style={styles.dialogButton}>
-            <Text style={styles.dialogButtonText}>확인</Text>
-          </Pressable>
-        </View>
-      </View>
-    </Modal>
-  );
-}
-
 function isDormitoryCode(value: string | null): value is DormitoryCode {
   return dormitoryOptions.some(option => option.code === value);
-}
-
-function isSvgDataUri(uri: string) {
-  return uri.startsWith('data:image/svg+xml');
-}
-
-function getSvgAspectRatioFromDataUri(uri: string) {
-  try {
-    const commaIndex = uri.indexOf(',');
-    if (commaIndex < 0) {
-      return null;
-    }
-
-    const metadata = uri.slice(0, commaIndex);
-    const encodedSvg = uri.slice(commaIndex + 1);
-    const svgMarkup = metadata.includes(';base64')
-      ? decodeSvgFromBase64(encodedSvg)
-      : decodeURIComponent(encodedSvg);
-    if (!svgMarkup) {
-      return null;
-    }
-
-    const viewBox = svgMarkup.match(/viewBox=['"]([^'"]+)['"]/i)?.[1];
-    if (viewBox) {
-      const values = viewBox.split(/\s+/).map(Number);
-      const viewWidth = values[2];
-      const viewHeight = values[3];
-      if (viewWidth > 0 && viewHeight > 0) {
-        return viewWidth / viewHeight;
-      }
-    }
-
-    const widthMatch = svgMarkup.match(/width=['"]([\d.]+)(?:px)?['"]/i);
-    const heightMatch = svgMarkup.match(/height=['"]([\d.]+)(?:px)?['"]/i);
-    if (widthMatch && heightMatch) {
-      const width = Number(widthMatch[1]);
-      const height = Number(heightMatch[1]);
-      if (width > 0 && height > 0) {
-        return width / height;
-      }
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-function decodeSvgFromBase64(value: string) {
-  if (typeof globalThis.atob !== 'function') {
-    return null;
-  }
-
-  try {
-    return globalThis.atob(value);
-  } catch {
-    return null;
-  }
-}
-
-function isLikelyUrl(value: string) {
-  return /^https?:\/\//i.test(value);
-}
-
-type NoticeBodySegment =
-  | {
-      type: 'text';
-      value: string;
-    }
-  | {
-      type: 'link';
-      value: string;
-      url: string;
-    };
-
-type NoticeBodyTableRow = {
-  cells: string[];
-  isHeader: boolean;
-};
-
-type NoticeBodyTable = {
-  rows: NoticeBodyTableRow[];
-  columnCount: number;
-};
-
-type NoticeBodyBlock =
-  | {
-      type: 'text';
-      value: string;
-    }
-  | {
-      type: 'table';
-      value: NoticeBodyTable;
-    };
-
-function normalizeExternalUrl(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return '';
-  }
-
-  return isLikelyUrl(trimmed) ? trimmed : `https://${trimmed}`;
-}
-
-function splitNoticeLinkTrailingText(value: string) {
-  const match = value.match(NOTICE_BODY_TRAILING_LINK_PATTERN);
-  if (!match) {
-    return {
-      linkText: value,
-      trailingText: '',
-    };
-  }
-
-  const linkText = value.slice(0, -match[0].length);
-  if (!linkText) {
-    return {
-      linkText: value,
-      trailingText: '',
-    };
-  }
-
-  return {
-    linkText,
-    trailingText: match[0],
-  };
-}
-
-function decodeNoticeHtmlEntities(value: string) {
-  return value
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&#160;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-}
-
-function stripNoticeHtmlToText(html: string) {
-  return decodeNoticeHtmlEntities(
-    html
-      .replace(/<(br|\/p|\/div|\/li)\b[^>]*>/gi, '\n')
-      .replace(/<li\b[^>]*>/gi, '• ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\r\n?/g, '\n')
-      .replace(/[ \t]+\n/g, '\n')
-      .replace(/\n[ \t]+/g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .replace(/[ \t]{2,}/g, ' ')
-      .trim(),
-  );
-}
-
-function parseNoticeTableFromHtml(tableHtml: string): NoticeBodyTable | null {
-  const parsedRows = Array.from(
-    tableHtml.matchAll(/<tr\b[^>]*>[\s\S]*?(?:<\/tr>|(?=<tr\b|<\/table>|$))/gi),
-  )
-    .map(rowMatch => {
-      const rowHtml = rowMatch[0];
-      const rawCells = Array.from(rowHtml.matchAll(/<(th|td)\b[^>]*>([\s\S]*?)<\/\1>/gi));
-      if (rawCells.length === 0) {
-        return null;
-      }
-
-      const cells = rawCells.map(([, , cellHtml]) =>
-        stripNoticeHtmlToText(cellHtml ?? '').replace(/\n+/g, ' ').trim(),
-      );
-      const isHeader = rawCells.some(([, tagName]) => String(tagName).toLowerCase() === 'th');
-
-      return {
-        cells,
-        isHeader,
-      };
-    })
-    .filter((row): row is NoticeBodyTableRow => row !== null);
-
-  if (parsedRows.length === 0) {
-    return null;
-  }
-
-  const columnCount = Math.max(1, ...parsedRows.map(row => row.cells.length));
-  const normalizedRows = parsedRows.map(row => ({
-    ...row,
-    cells: row.cells.concat(Array.from({ length: Math.max(0, columnCount - row.cells.length) }, () => '')),
-  }));
-
-  return {
-    rows: normalizedRows,
-    columnCount,
-  };
-}
-
-function parseNoticeBodyBlocksFromHtml(bodyHtml: string | undefined, fallbackBodyText: string) {
-  const blocks: NoticeBodyBlock[] = [];
-
-  if (!bodyHtml || !/<table\b/i.test(bodyHtml)) {
-    const trimmedFallback = fallbackBodyText.trim();
-    if (!trimmedFallback) {
-      return blocks;
-    }
-
-    blocks.push({
-      type: 'text',
-      value: trimmedFallback,
-    });
-    return blocks;
-  }
-
-  const tableRegex = /<table\b[\s\S]*?<\/table>/gi;
-  let lastIndex = 0;
-  for (const match of bodyHtml.matchAll(tableRegex)) {
-    const tableHtml = match[0];
-    const startIndex = match.index ?? -1;
-
-    if (!tableHtml || startIndex < 0) {
-      continue;
-    }
-
-    if (startIndex > lastIndex) {
-      const textBlock = stripNoticeHtmlToText(bodyHtml.slice(lastIndex, startIndex));
-      if (textBlock) {
-        blocks.push({
-          type: 'text',
-          value: textBlock,
-        });
-      }
-    }
-
-    const parsedTable = parseNoticeTableFromHtml(tableHtml);
-    if (parsedTable) {
-      blocks.push({
-        type: 'table',
-        value: parsedTable,
-      });
-    }
-
-    lastIndex = startIndex + tableHtml.length;
-  }
-
-  if (lastIndex < bodyHtml.length) {
-    const tailText = stripNoticeHtmlToText(bodyHtml.slice(lastIndex));
-    if (tailText) {
-      blocks.push({
-        type: 'text',
-        value: tailText,
-      });
-    }
-  }
-
-  if (blocks.length === 0 && fallbackBodyText.trim()) {
-    blocks.push({
-      type: 'text',
-      value: fallbackBodyText.trim(),
-    });
-  }
-
-  return blocks;
-}
-
-function parseNoticeBodyWithLinks(content: string): NoticeBodySegment[] {
-  const segments: NoticeBodySegment[] = [];
-  let lastIndex = 0;
-
-  for (const match of content.matchAll(NOTICE_BODY_LINK_PATTERN)) {
-    const matchValue = match[0];
-    const startIndex = match.index ?? -1;
-
-    if (!matchValue || startIndex < 0) {
-      continue;
-    }
-
-    if (startIndex > lastIndex) {
-      segments.push({
-        type: 'text',
-        value: content.slice(lastIndex, startIndex),
-      });
-    }
-
-    const { linkText, trailingText } = splitNoticeLinkTrailingText(matchValue);
-    const normalizedUrl = normalizeExternalUrl(linkText);
-
-    if (normalizedUrl) {
-      segments.push({
-        type: 'link',
-        value: linkText,
-        url: normalizedUrl,
-      });
-    } else {
-      segments.push({
-        type: 'text',
-        value: matchValue,
-      });
-    }
-
-    if (trailingText) {
-      segments.push({
-        type: 'text',
-        value: trailingText,
-      });
-    }
-
-    lastIndex = startIndex + matchValue.length;
-  }
-
-  if (lastIndex < content.length) {
-    segments.push({
-      type: 'text',
-      value: content.slice(lastIndex),
-    });
-  }
-
-  if (segments.length === 0) {
-    segments.push({
-      type: 'text',
-      value: content,
-    });
-  }
-
-  return segments;
-}
-
-function isLikelyImageUrl(value: string) {
-  const lower = value.toLowerCase();
-  if (/\.(png|jpe?g|gif|bmp|webp|svg)(?:[?#].*)?$/i.test(lower)) {
-    return true;
-  }
-
-  return /thumbnailprint\.do|imgdownload|\/api\/image\//i.test(lower);
 }
 
 function getNoticeCategoryLabel(notice: NoticeItem): NoticeCategoryChip {
@@ -4956,25 +4366,6 @@ function getQuickLaunchPalette(index: number) {
   const toneCount = colors.quickLaunchTones.length;
   const paletteIndex = ((index % toneCount) + toneCount) % toneCount;
   return colors.quickLaunchTones[paletteIndex];
-}
-
-function normalizeListPreviewText(value: string) {
-  return value
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/\u00A0/g, ' ')
-    .replace(/[•·]/g, ' ')
-    .replace(/[\r\n\t]+/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-}
-
-function buildRetryImageUri(uri: string, retryAttempt: number, retrySeed: number) {
-  if (!uri || retryAttempt <= 0 || !/^https?:\/\//i.test(uri)) {
-    return uri;
-  }
-
-  const separator = uri.includes('?') ? '&' : '?';
-  return `${uri}${separator}hl_img_retry=${retryAttempt}_${retrySeed}`;
 }
 
 function buildMealHtml(uri: string) {
@@ -5864,6 +5255,19 @@ function createStyles(
   },
   homeMealHeroMedia: {
     position: 'relative',
+  },
+  homeMealLayerStack: {
+    position: 'relative',
+  },
+  homeMealLayer: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  homeMealLayerHidden: {
+    opacity: 0,
   },
   homeMealHeroOverlay: {
     ...StyleSheet.absoluteFillObject,

@@ -10,6 +10,7 @@ export const STORAGE_KEYS = {
   favoriteNoticeKeys: '@hoseolife/favorite-notice-keys',
   dormitoryNoticeCachePrefix: '@hoseolife/dormitory-notice-cache',
   dormitoryMealCachePrefix: '@hoseolife/dormitory-meal-cache',
+  dormitoryMealImageSnapshotPrefix: '@hoseolife/dormitory-meal-image-snapshot',
 } as const;
 
 let inMemorySelectedDormitory: DormitoryCode | null = null;
@@ -17,6 +18,7 @@ let inMemoryThemePreference: ThemePreference = 'SYSTEM';
 let inMemoryFavoriteNoticeKeys: string[] = [];
 const inMemoryDormitoryNoticeCache = new Map<DormitoryCode, StoredDormitoryNoticeCachePayload>();
 const inMemoryDormitoryMealCache = new Map<DormitoryCode, StoredDormitoryMealCachePayload>();
+const inMemoryDormitoryMealImageSnapshot = new Map<DormitoryCode, StoredDormitoryMealImageSnapshotPayload>();
 const VALID_DORMITORY_CODES: DormitoryCode[] = [
   'ASAN_HAPPY',
   'ASAN_DIRECT',
@@ -33,6 +35,12 @@ type StoredDormitoryMealCachePayload = {
   cachedAt: number;
   meal: MealItem | null;
 };
+export type StoredDormitoryMealImageSnapshotPayload = {
+  cachedAt: number;
+  remoteUri: string;
+  dataUri: string;
+};
+const MAX_MEAL_IMAGE_SNAPSHOT_URI_LENGTH = 2_500_000;
 
 function sanitizeNoticeStringArray(value: unknown) {
   if (!Array.isArray(value)) {
@@ -195,6 +203,50 @@ function getDormitoryNoticeCacheStorageKey(dormitoryCode: DormitoryCode) {
 
 function getDormitoryMealCacheStorageKey(dormitoryCode: DormitoryCode) {
   return `${STORAGE_KEYS.dormitoryMealCachePrefix}:${dormitoryCode}`;
+}
+
+function getDormitoryMealImageSnapshotStorageKey(dormitoryCode: DormitoryCode) {
+  return `${STORAGE_KEYS.dormitoryMealImageSnapshotPrefix}:${dormitoryCode}`;
+}
+
+function sanitizeMealImageSnapshotRemoteUri(value: unknown) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  return /^https?:\/\//i.test(normalized) ? normalized : null;
+}
+
+function sanitizeMealImageSnapshotDataUri(value: unknown) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+  if (!normalized || normalized.length > MAX_MEAL_IMAGE_SNAPSHOT_URI_LENGTH) {
+    return null;
+  }
+
+  if (!normalized.startsWith('data:image/')) {
+    return null;
+  }
+
+  const separatorIndex = normalized.indexOf(',');
+  if (separatorIndex <= 0) {
+    return null;
+  }
+
+  const payload = normalized.slice(separatorIndex + 1);
+  if (!payload || !/^[A-Za-z0-9+/=\r\n]+$/.test(payload)) {
+    return null;
+  }
+
+  return normalized;
 }
 
 export async function getStoredDormitory() {
@@ -481,6 +533,122 @@ export async function setStoredDormitoryMealCache(
     return true;
   } catch (error) {
     console.warn('dormitory meal cache save failed', error);
+    return false;
+  }
+}
+
+export async function getStoredDormitoryMealImageSnapshot(
+  dormitoryCode: DormitoryCode,
+): Promise<StoredDormitoryMealImageSnapshotPayload | null> {
+  const inMemoryCached = inMemoryDormitoryMealImageSnapshot.get(dormitoryCode);
+  if (inMemoryCached) {
+    return {
+      cachedAt: inMemoryCached.cachedAt,
+      remoteUri: inMemoryCached.remoteUri,
+      dataUri: inMemoryCached.dataUri,
+    };
+  }
+
+  if (typeof AsyncStorage?.getItem !== 'function') {
+    return null;
+  }
+
+  try {
+    const raw = await AsyncStorage.getItem(getDormitoryMealImageSnapshotStorageKey(dormitoryCode));
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as {
+      cachedAt?: unknown;
+      remoteUri?: unknown;
+      dataUri?: unknown;
+      // Backward compatibility with older snapshot payload keys.
+      canonicalUri?: unknown;
+      snapshotUri?: unknown;
+    };
+    const remoteUri = sanitizeMealImageSnapshotRemoteUri(parsed?.remoteUri ?? parsed?.canonicalUri);
+    const dataUri = sanitizeMealImageSnapshotDataUri(parsed?.dataUri ?? parsed?.snapshotUri);
+    if (!remoteUri || !dataUri) {
+      return null;
+    }
+
+    const cachedAt =
+      typeof parsed?.cachedAt === 'number' && Number.isFinite(parsed.cachedAt)
+        ? parsed.cachedAt
+        : Date.now();
+
+    const payload = {
+      cachedAt,
+      remoteUri,
+      dataUri,
+    };
+    inMemoryDormitoryMealImageSnapshot.set(dormitoryCode, payload);
+    return {
+      cachedAt: payload.cachedAt,
+      remoteUri: payload.remoteUri,
+      dataUri: payload.dataUri,
+    };
+  } catch (error) {
+    console.warn('dormitory meal image snapshot load failed', error);
+    return null;
+  }
+}
+
+export async function setStoredDormitoryMealImageSnapshot(
+  dormitoryCode: DormitoryCode,
+  snapshot:
+    | {
+        remoteUri?: string;
+        dataUri?: string;
+        // Backward compatibility with older call sites.
+        canonicalUri?: string;
+        snapshotUri?: string;
+      }
+    | null,
+) {
+  if (snapshot === null) {
+    inMemoryDormitoryMealImageSnapshot.delete(dormitoryCode);
+
+    if (typeof AsyncStorage?.removeItem !== 'function') {
+      return true;
+    }
+
+    try {
+      await AsyncStorage.removeItem(getDormitoryMealImageSnapshotStorageKey(dormitoryCode));
+      return true;
+    } catch (error) {
+      console.warn('dormitory meal image snapshot clear failed', error);
+      return false;
+    }
+  }
+
+  const remoteUri = sanitizeMealImageSnapshotRemoteUri(snapshot.remoteUri ?? snapshot.canonicalUri);
+  const dataUri = sanitizeMealImageSnapshotDataUri(snapshot.dataUri ?? snapshot.snapshotUri);
+  if (!remoteUri || !dataUri) {
+    return false;
+  }
+
+  const payload: StoredDormitoryMealImageSnapshotPayload = {
+    cachedAt: Date.now(),
+    remoteUri,
+    dataUri,
+  };
+
+  inMemoryDormitoryMealImageSnapshot.set(dormitoryCode, payload);
+
+  if (typeof AsyncStorage?.setItem !== 'function') {
+    return true;
+  }
+
+  try {
+    await AsyncStorage.setItem(
+      getDormitoryMealImageSnapshotStorageKey(dormitoryCode),
+      JSON.stringify(payload),
+    );
+    return true;
+  } catch (error) {
+    console.warn('dormitory meal image snapshot save failed', error);
     return false;
   }
 }
