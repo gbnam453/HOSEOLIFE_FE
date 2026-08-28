@@ -1,0 +1,39 @@
+.DS_Store
+.idea/
+HOSEOLIFE/
+
+# Environment and local-only configuration
+.env
+.env.local
+.env.*.local
+local.properties
+
+# Dependency and build output
+node_modules/
+dist/
+dist-ssr/
+build/
+target/
+out/
+bin/
+.gradle/
+.gradle-local/
+.cxx/
+.kotlin/
+coverage/
+
+# Logs and temporary files
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+~$*
+
+# Local credentials, signing material, and release artifacts
+*.p8
+*.jks
+*.keystore
+*.aab
+*.apk
+AuthKey_*.p8
