@@ -1,0 +1,14 @@
+appId: com.gbnam.hoseolife
+---
+- launchApp:
+    clearState: true
+- assertVisible: "현재 어디에 살고 있나요?"
+- tapOn:
+    point: "50%,35%"
+- assertVisible: "호서라이프"
+- assertVisible: "최근 공지"
+- stopApp
+- launchApp
+- assertNotVisible: "현재 어디에 살고 있나요?"
+- assertVisible: "호서라이프"
+- assertVisible: "최근 공지"
