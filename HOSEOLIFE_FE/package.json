@@ -1,6 +1,6 @@
 {
   "name": "com.gbnam.hoseolife",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "private": true,
   "scripts": {
     "android": "RCT_METRO_PORT=8092 react-native run-android --port 8092",

@@ -58,15 +58,18 @@ import {
   getStoredFavoriteNoticeKeys,
   getStoredDormitory,
   getStoredDormitoryMealCache,
+  getStoredDormitoryMealImageSnapshot,
   getStoredDormitoryNoticeCache,
   getStoredThemePreference,
   setStoredDormitoryMealCache,
+  setStoredDormitoryMealImageSnapshot,
   setStoredDormitoryNoticeCache,
   setStoredFavoriteNoticeKeys,
   setStoredDormitory,
   setStoredThemePreference,
   type ThemePreference,
 } from './src/storage';
+import { convertRemoteMealImageToDataUri } from './src/utils/mealImageSnapshot';
 import {
   getCachedImageSize,
   getCachedImageSource,
@@ -131,6 +134,7 @@ const AppStack = createNativeStackNavigator<AppStackParamList>();
 type NoticeCategoryChip = '전체' | '공지사항' | '일반 공지' | '입관 공지';
 type MealTab = 'BREAKFAST' | 'DINNER' | 'EXTRA';
 type ActiveDormitoryCode = Extract<DormitoryCode, 'ASAN_HAPPY' | 'ASAN_DIRECT'>;
+type MealImageSnapshotMap = Partial<Record<ActiveDormitoryCode, { remoteUri: string; dataUri: string }>>;
 const ONBOARDING_DORMITORY_CODES: DormitoryCode[] = ['ASAN_HAPPY', 'ASAN_DIRECT'];
 const HOME_SWITCHABLE_DORMITORY_CODES: Extract<DormitoryCode, 'ASAN_HAPPY' | 'ASAN_DIRECT'>[] = [
   'ASAN_HAPPY',
@@ -898,6 +902,7 @@ function AppContent({
   const [notices, setNotices] = useState<NoticeItem[]>([]);
   const [meal, setMeal] = useState<MealItem | null>(null);
   const [mealUriByDormitory, setMealUriByDormitory] = useState<Partial<Record<ActiveDormitoryCode, string>>>({});
+  const [mealImageSnapshotByDormitory, setMealImageSnapshotByDormitory] = useState<MealImageSnapshotMap>({});
   const [contentLoading, setContentLoading] = useState(false);
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
   const [contentError, setContentError] = useState<string | null>(null);
@@ -964,6 +969,60 @@ function AppContent({
       };
     });
   }, []);
+  const cacheMealImageSnapshot = useCallback((dormitoryCode: ActiveDormitoryCode, sourceMeal?: MealItem | null) => {
+    const remoteUri = sourceMeal?.imageUri?.trim();
+    if (!remoteUri || !isRemoteHttpUrl(remoteUri)) {
+      return;
+    }
+
+    void convertRemoteMealImageToDataUri(remoteUri).then(dataUri => {
+      if (!dataUri) {
+        return;
+      }
+
+      const latestMealUri = dormitoryContentCacheRef.current.get(dormitoryCode)?.meal?.imageUri?.trim();
+      if (latestMealUri && latestMealUri !== remoteUri) {
+        return;
+      }
+
+      void setStoredDormitoryMealImageSnapshot(dormitoryCode, {
+        remoteUri,
+        dataUri,
+      });
+      setMealImageSnapshotByDormitory(current => {
+        const currentSnapshot = current[dormitoryCode];
+        if (currentSnapshot?.remoteUri === remoteUri && currentSnapshot.dataUri === dataUri) {
+          return current;
+        }
+
+        return {
+          ...current,
+          [dormitoryCode]: {
+            remoteUri,
+            dataUri,
+          },
+        };
+      });
+    });
+  }, []);
+  const getDisplayMealUri = useCallback(
+    (dormitoryCode: ActiveDormitoryCode | null, sourceMeal?: MealItem | null) => {
+      const remoteUri = sourceMeal?.imageUri?.trim();
+      if (!remoteUri) {
+        return undefined;
+      }
+
+      if (dormitoryCode) {
+        const snapshot = mealImageSnapshotByDormitory[dormitoryCode];
+        if (snapshot?.remoteUri === remoteUri && snapshot.dataUri) {
+          return snapshot.dataUri;
+        }
+      }
+
+      return remoteUri;
+    },
+    [mealImageSnapshotByDormitory],
+  );
 
   const hydrateNoticeDetailCacheFromNotices = (
     dormitoryCode: ActiveDormitoryCode,
@@ -1025,7 +1084,23 @@ function AppContent({
     void setStoredDormitoryNoticeCache(dormitoryCode, nextNotices);
   };
 
-  const mealDisplayUri = meal?.imageUri?.trim() || undefined;
+  const mealDisplayDormitoryCode: ActiveDormitoryCode | null =
+    selectedDormitory && isActiveDormitory(selectedDormitory) ? selectedDormitory : null;
+  const mealDisplayUri = getDisplayMealUri(mealDisplayDormitoryCode, meal);
+  const displayMealUriByDormitory = useMemo(() => {
+    const nextUris: Partial<Record<ActiveDormitoryCode, string>> = {};
+    HOME_SWITCHABLE_DORMITORY_CODES.forEach(dormitoryCode => {
+      const remoteUri = mealUriByDormitory[dormitoryCode]?.trim();
+      if (!remoteUri) {
+        return;
+      }
+
+      const snapshot = mealImageSnapshotByDormitory[dormitoryCode];
+      nextUris[dormitoryCode] =
+        snapshot?.remoteUri === remoteUri && snapshot.dataUri ? snapshot.dataUri : remoteUri;
+    });
+    return nextUris;
+  }, [mealImageSnapshotByDormitory, mealUriByDormitory]);
 
   useLayoutEffect(() => {
     const nextThemeDormitoryCode = selectedDormitory ?? themedDormitoryCode;
@@ -1334,9 +1409,10 @@ function AppContent({
     let isMounted = true;
 
     const hydrateDormitoryCacheFromStorage = async (dormitoryCode: ActiveDormitoryCode) => {
-      const [storedNoticeCache, storedMealCache] = await Promise.all([
+      const [storedNoticeCache, storedMealCache, storedMealImageSnapshot] = await Promise.all([
         getStoredDormitoryNoticeCache(dormitoryCode),
         getStoredDormitoryMealCache(dormitoryCode),
+        getStoredDormitoryMealImageSnapshot(dormitoryCode),
       ]);
 
       if (!isMounted) {
@@ -1345,6 +1421,20 @@ function AppContent({
 
       const storedNotices = storedNoticeCache?.notices ?? [];
       const storedMeal = storedMealCache?.meal ?? null;
+      const storedMealUri = storedMeal?.imageUri?.trim();
+      if (
+        storedMealUri &&
+        storedMealImageSnapshot?.remoteUri === storedMealUri &&
+        storedMealImageSnapshot.dataUri
+      ) {
+        setMealImageSnapshotByDormitory(current => ({
+          ...current,
+          [dormitoryCode]: {
+            remoteUri: storedMealImageSnapshot.remoteUri,
+            dataUri: storedMealImageSnapshot.dataUri,
+          },
+        }));
+      }
       if (!storedMeal && storedNotices.length === 0) {
         storageHydratedDormitoriesRef.current.add(dormitoryCode);
         return;
@@ -1364,6 +1454,7 @@ function AppContent({
 
       dormitoryContentCacheRef.current.set(dormitoryCode, nextCachedContent);
       syncMealUriCache(dormitoryCode, nextCachedContent.meal);
+      cacheMealImageSnapshot(dormitoryCode, nextCachedContent.meal);
       warmDormitoryContentMedia(nextCachedContent);
 
       if (selectedDormitoryRef.current === dormitoryCode) {
@@ -1387,7 +1478,7 @@ function AppContent({
     return () => {
       isMounted = false;
     };
-  }, [syncMealUriCache]);
+  }, [cacheMealImageSnapshot, syncMealUriCache]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1473,6 +1564,7 @@ function AppContent({
         setNotices(mergedNotices);
         setMeal(resolvedMeal);
         syncMealUriCache(activeDormitory, resolvedMeal);
+        cacheMealImageSnapshot(activeDormitory, resolvedMeal);
         markDormitoryAsCrawled(activeDormitory);
         if (resolvedMeal) {
           void setStoredDormitoryMealCache(activeDormitory, resolvedMeal);
@@ -1514,6 +1606,7 @@ function AppContent({
                 };
                 dormitoryContentCacheRef.current.set(prefetchTarget, mergedPrefetchedContent);
                 syncMealUriCache(prefetchTarget, resolvedPrefetchedMeal);
+                cacheMealImageSnapshot(prefetchTarget, resolvedPrefetchedMeal);
                 markDormitoryAsCrawled(prefetchTarget);
                 if (resolvedPrefetchedMeal) {
                   void setStoredDormitoryMealCache(prefetchTarget, resolvedPrefetchedMeal);
@@ -1621,7 +1714,7 @@ function AppContent({
     return () => {
       isMounted = false;
     };
-  }, [markDormitoryAsCrawled, reloadSeq, selectedDormitory, syncMealUriCache]);
+  }, [cacheMealImageSnapshot, markDormitoryAsCrawled, reloadSeq, selectedDormitory, syncMealUriCache]);
 
   useEffect(() => {
     const noticeImageUris = notices.flatMap(item => item.contentImages ?? []);
@@ -2068,7 +2161,7 @@ function AppContent({
                   notices={notices}
                   meal={meal}
                   mealDisplayUri={mealDisplayUri}
-                  mealUriByDormitory={mealUriByDormitory}
+                  mealUriByDormitory={displayMealUriByDormitory}
                   quickActions={quickActions}
                   contentLoading={contentLoading}
                   contentError={contentError}
